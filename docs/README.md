@@ -12,13 +12,12 @@
 | [`data-model.md`](./data-model.md)                     | 统一数据模型、Token 语义、去重键、SQLite 表结构                                            | 修改模块映射、表结构、去重键、口径或迁移时     |
 | [`data-source-research.md`](./data-source-research.md) | 各客户端本机数据来源、字段映射与限制                                                       | 数据源结构、字段或客户端版本行为变化时         |
 | [`releases.md`](./releases.md)                         | 构建、版本号、GitHub Release 与 `latest.json` 更新清单                                     | 发布方式、更新检查或版本规则变化时             |
-| [`product-review-2026-10-12.md`](./product-review-2026-10-12.md) | 历史产品审查（WebView2 版本）；WPF 版沿用相同交互，结论仍可参考                      | 仅补历史备注                                   |
+| [`product-review-2026-10-12.md`](./product-review-2026-10-12.md) | 历史产品审查（2026-10-12），结论仍可参考                                              | 仅补历史备注                                   |
 
 维护约定：
 
 - 构建与运行命令以 `AGENTS.md` 与 `wpf/*/*.csproj` 为准，本文档不重复维护命令清单。
-- 当前实现为 C# / .NET 10 / WPF；Tauri + React + Rust 版本已移除，快照见
-  `backup/webview-2026-10-19` 分支，不再维护。
+- 当前实现为 C# / .NET 10 / WPF，位于 `wpf/TokenView.Wpf`。
 - `AGENTS.md` 与 docs/ 下的所有文档必须保持一致：术语（`measured` / `derived` / `estimated`）、
   目录路径、命令名称。
 - 规范变更与代码变更放在同一个提交里，并在提交说明中说明原因。

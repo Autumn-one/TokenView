@@ -25,8 +25,7 @@ WorkBuddy、GitHub Copilot、Gemini CLI、Grok CLI、MCode、Devin、Command Cod
 
 当前仓库状态：**C# / .NET 10 / WPF 是唯一实现**，位于 `wpf/TokenView.Wpf`；`wpf/TokenView.Probe`
 是无界面的采集/查询验证工具，`wpf/TokenView.Tests` 是 xUnit 测试项目。程序集、命名空间、数据目录
-与库文件统一使用 TokenView；首次启动会把旧版自有数据迁移到新目录。原 Tauri + React + Rust 实现已从
-工作区移除，完整快照保存在 `backup/webview-2026-10-19` 分支，仅用于历史对照，不再维护、不参与构建。
+与库文件统一使用 TokenView；首次启动会把旧版自有数据迁移到新目录。
 
 公告与关于页动态信息已接入：启动时及每 20 分钟按固定镜像列表拉取公开的 `mirrors.json`、`README.md`
 与 `info.md`，用 Markdig 渲染为 WPF FlowDocument；正文只在内存，仅持久化 `lastReadAnnouncementHash`。
@@ -43,7 +42,7 @@ WorkBuddy、GitHub Copilot、Gemini CLI、Grok CLI、MCode、Devin、Command Cod
 | 目标平台 | Windows 10 / 11 x64                                           |
 | 工具链   | .NET SDK 10；Windows 上使用 MSVC 运行时                       |
 
-- 仓库不再使用 Node / pnpm / Rust / Tauri；不要引入 `package.json`、`Cargo.toml` 或前端构建链。
+- 仓库统一使用 .NET / WPF 工具链；不要引入 `package.json`、`Cargo.toml` 或前端构建链。
 - 依赖版本以 `wpf/TokenView.Wpf/TokenView.Wpf.csproj` 为准；新增 NuGet 依赖前必须说明理由、
   维护状态与体积影响，并在 `docs/architecture.md` 登记。
 - 不引入带遥测/统计上报的依赖。

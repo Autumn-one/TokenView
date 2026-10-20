@@ -9,8 +9,7 @@ TokenView 是一款本地优先的 Windows 桌面应用，用于分析各类 AI 
 
 ![TokenView 总览](docs/images/overview.png)
 
-当前实现为 C# / .NET 10 / WPF。此前的 Tauri + React + Rust 实现已从工作区移除，完整快照保留在
-`backup/webview-2026-10-19` 分支，仅供对照。
+当前实现为 C# / .NET 10 / WPF。
 
 ## 极简设计
 

@@ -10,9 +10,7 @@ settings file all use the TokenView name.
 
 ![TokenView overview](docs/images/overview.png)
 
-The current implementation is C# / .NET 10 / WPF. The earlier Tauri + React + Rust implementation
-was removed from the working tree; a complete snapshot remains in the
-`backup/webview-2026-10-19` branch for reference only.
+The current implementation is C# / .NET 10 / WPF.
 
 ## Minimal by design
 

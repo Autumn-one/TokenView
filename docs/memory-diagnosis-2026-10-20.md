@@ -61,16 +61,13 @@
 
 ### 1.3 已知基线（仓库文档记录）
 
-`wpf/README.md:95-102`：
+`wpf/README.md`：
 
 | 版本 | 私有内存 | 工作集 |
 | --- | ---: | ---: |
-| WebView2 / Tauri 生产版（含子进程） | 约 332 MB | 约 539 MB |
 | WPF Release（18 个采集器 + 完整设置） | 约 256 MB | 约 321 MB |
 
 并注明：首次同步 Devin 的 2.3 GB 源库时有约 300 MB 瞬时峰值，完成后 GC 回落。
-
-`docs/architecture.md:458` 另有 Tauri 版历史对照：优化前 415 MB 私有 / 676 MB 工作集 → 引入小时预聚合后 317 MB / 541 MB，Rust 主进程 96 MB → 19 MB。
 
 ---
 
