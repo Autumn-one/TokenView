@@ -41,8 +41,15 @@ public static class UpdateInstaller
 
     public static void Launch(PreparedUpdate update, Action shutdown)
     {
-        var appDirectory = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
-        var executableName = Path.GetFileName(Environment.ProcessPath) ?? ExecutableName;
+        var processPath = Environment.ProcessPath;
+        var executableName = Path.GetFileName(processPath);
+        // 通过 dotnet.exe 直接运行 dll 时不能替换宿主目录。
+        if (string.IsNullOrEmpty(processPath) || string.IsNullOrEmpty(executableName) ||
+            string.Equals(executableName, "dotnet.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("当前运行方式不支持自动更新，请使用 TokenView.Wpf.exe 启动");
+        }
+        var appDirectory = Path.GetDirectoryName(processPath) ?? AppContext.BaseDirectory;
         var script = Path.Combine(Path.GetTempPath(), $"TokenView-update-{Guid.NewGuid():N}.ps1");
         File.WriteAllText(script, Script, new UTF8Encoding(false));
 
