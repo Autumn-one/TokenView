@@ -128,9 +128,10 @@ OpenCode `#6366f1`、Kimi Code `#4f8ff7`、Qoder `#c026d3` 等；未登记客户
 - 浮层（`Popup` / tooltip）从触发元素下方展开并保留 8px 间隙（`Placement=Bottom`、`VerticalOffset=8`），日期浮层按 `HorizontalOffset`
   右缘对齐触发按钮；`AllowsTransparency` + 圆角 14 + 阴影，窗口移动或状态变化时收起。不使用 toast 框架：一次性反馈用 `MessageBox` 或状态区文字。
 - **公告与关于页 Markdown**（2026-10-20）：工具栏铃铛 `IconButton` + 右上角 7px `AccentBrush` 未读点（`IsHitTestVisible=False`，
-  `ToolTip` 区分“公告 / 公告（有未读）”），相邻的“关于”`IconButton` 以本地绘制的圆圈 + 竖笔图标打开设置 · 关于；`AnnouncementWindow` 顶部标题 + `AccentSoftBrush` 未读徽标 + 更新时间 + 刷新按钮，正文是单张
+  `ToolTip` 区分“公告 / 公告（有未读）”）；有未读时铃铛描边改用 `DangerBrush`，并以顶部为轴做 ±13°、约 3.4 秒一轮的轻微摆动，
+  已读后恢复 `MutedBrush` 并停止。相邻的“关于”`IconButton` 以本地绘制的圆圈 + 竖笔图标打开设置 · 关于；`AnnouncementWindow` 顶部标题 + `AccentSoftBrush` 未读徽标 + 更新时间 + 刷新按钮，正文是单张
   `CardStyle` 内的 `MarkdownView`，底部 `DangerBrush` 错误条 + 重试按钮；获取中 / 空 / 错误三态用居中状态块。`MarkdownView` 把 HTML 当纯文本、
-  图片只显示为链接、不下载远程资源，外部链接交给系统浏览器；正文只在内存，仅持久化已读哈希。设置 · 关于同样内嵌 `MarkdownView`，只保留版本号、动态信息标题与更新时间，不再常驻来源或隐私说明（隐私说明集中在数据与隐私分类与来源页）。
+  图片只显示为链接、不下载远程资源，外部链接交给系统浏览器；正文只在内存，仅持久化已读哈希。设置 · 关于同样内嵌 `MarkdownView`，只保留版本号（作为「关于 TokenView」标题后缀的同行副标，`StatLabel`）、动态信息标题与更新时间，不再常驻来源或隐私说明（隐私说明集中在数据与隐私分类与来源页）。
 
 ## 6. 数据可视化
 

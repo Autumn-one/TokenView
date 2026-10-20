@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     private TrayService? _tray;
     private bool _forceClose;
     private bool _pendingExit;
+    private System.Windows.Media.Animation.Storyboard? _announcementSwing;
+    private bool _announcementSwinging;
     private readonly DispatcherTimer _skeletonTimer = new() { Interval = TimeSpan.FromMilliseconds(140) };
     private readonly DispatcherTimer _tooltipHideTimer = new() { Interval = TimeSpan.FromMilliseconds(160) };
     private bool _tooltipByModel;
@@ -386,8 +388,27 @@ public partial class MainWindow : Window
     private void UpdateAnnouncementBadge()
     {
         var service = AnnouncementService.Current;
-        AnnouncementUnreadDot.Visibility = service.HasUnread ? Visibility.Visible : Visibility.Collapsed;
-        AnnouncementButton.ToolTip = service.HasUnread ? "公告（有未读）" : "公告";
+        var unread = service.HasUnread;
+        AnnouncementUnreadDot.Visibility = unread ? Visibility.Visible : Visibility.Collapsed;
+        AnnouncementButton.ToolTip = unread ? "公告（有未读）" : "公告";
+        AnnouncementBellPath.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty,
+            unread ? "DangerBrush" : "MutedBrush");
+        if (unread)
+        {
+            if (_announcementSwinging)
+            {
+                return;
+            }
+            _announcementSwing ??= (System.Windows.Media.Animation.Storyboard)FindResource("AnnouncementBellSwing");
+            _announcementSwing.Begin(this, true);
+            _announcementSwinging = true;
+        }
+        else if (_announcementSwinging)
+        {
+            _announcementSwing?.Stop(this);
+            AnnouncementBellRotate.Angle = 0;
+            _announcementSwinging = false;
+        }
     }
 
     private void StatusText_Click(object sender, MouseButtonEventArgs e)
