@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
@@ -9,6 +12,8 @@ namespace TokenView.Wpf;
 
 public partial class App : Application
 {
+    private const string RestartWaitArgument = "--restart-wait";
+
     private Mutex? _singleInstance;
     private EventWaitHandle? _activateEvent;
     private DispatcherTimer? _announcementTimer;
@@ -17,6 +22,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        WaitForRestartTarget(e.Args);
         _singleInstance = new Mutex(true, @"Local\TokenView.Wpf.SingleInstance", out var created);
         if (!created)
         {
@@ -122,5 +128,69 @@ public partial class App : Application
             window.ForceCloseForExit();
         }
         Shutdown();
+    }
+
+    /// <summary>启动新实例等待本进程退出后接管，再按正常流程关闭当前实例。</summary>
+    public void RestartApplication()
+    {
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(executable) ||
+            string.Equals(Path.GetFileName(executable), "dotnet.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show("当前运行方式不支持自动重启，请关闭后重新打开 TokenView。",
+                "无法重启", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            var start = new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = AppContext.BaseDirectory,
+            };
+            start.ArgumentList.Add(RestartWaitArgument);
+            start.ArgumentList.Add(Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+            Process.Start(start);
+        }
+        catch (Exception error) when (error is Win32Exception or IOException or InvalidOperationException)
+        {
+            MessageBox.Show($"无法启动新的 TokenView 实例：{error.Message}\n当前实例将继续运行。",
+                "重启失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        ExitApplication();
+    }
+
+    internal static int? ParseRestartPid(string[] args)
+    {
+        for (var index = 0; index < args.Length - 1; index++)
+        {
+            if (string.Equals(args[index], RestartWaitArgument, StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(args[index + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var pid) &&
+                pid > 0)
+            {
+                return pid;
+            }
+        }
+        return null;
+    }
+
+    private static void WaitForRestartTarget(string[] args)
+    {
+        if (ParseRestartPid(args) is not { } processId)
+        {
+            return;
+        }
+        try
+        {
+            using var previous = Process.GetProcessById(processId);
+            previous.WaitForExit(60_000);
+        }
+        catch (ArgumentException)
+        {
+            // 旧实例已经退出，直接继续启动。
+        }
     }
 }

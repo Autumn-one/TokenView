@@ -3,7 +3,7 @@ using Forms = System.Windows.Forms;
 
 namespace TokenView.Wpf.Services;
 
-/// <summary>系统托盘：显示主窗口、立即同步与退出。</summary>
+/// <summary>系统托盘：显示主窗口、立即同步、重启与退出。</summary>
 public sealed class TrayService : IDisposable
 {
     private readonly Forms.NotifyIcon _icon;
@@ -11,6 +11,7 @@ public sealed class TrayService : IDisposable
 
     public event Action? ShowRequested;
     public event Action? SyncRequested;
+    public event Action? RestartRequested;
     public event Action? ExitRequested;
     public event Action? UpdateRequested;
 
@@ -21,11 +22,14 @@ public sealed class TrayService : IDisposable
         open.Click += (_, _) => ShowRequested?.Invoke();
         _syncItem = new Forms.ToolStripMenuItem("立即同步");
         _syncItem.Click += (_, _) => SyncRequested?.Invoke();
+        var restart = new Forms.ToolStripMenuItem("重启 TokenView");
+        restart.Click += (_, _) => RestartRequested?.Invoke();
         var exit = new Forms.ToolStripMenuItem("退出");
         exit.Click += (_, _) => ExitRequested?.Invoke();
         menu.Items.Add(open);
         menu.Items.Add(_syncItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
+        menu.Items.Add(restart);
         menu.Items.Add(exit);
 
         _icon = new Forms.NotifyIcon

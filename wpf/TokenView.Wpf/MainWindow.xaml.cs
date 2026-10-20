@@ -96,6 +96,7 @@ public partial class MainWindow : Window
             TriggerSync(false);
         };
         _tray.ExitRequested += () => ((App)Application.Current).ExitApplication();
+        _tray.RestartRequested += () => ((App)Application.Current).RestartApplication();
         _tray.UpdateRequested += ApplyOrOpenPendingUpdate;
         _tray.SetRunning(SyncService.Current.IsRunning);
     }
