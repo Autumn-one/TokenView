@@ -183,7 +183,7 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   `Local\TokenView.Wpf.Activate` 唤醒已有实例（后台监听线程 → `MainWindow.RestoreFromTray`）后退出，
   避免两个进程同时写库。
 - **托盘**：`TrayService`（WinForms `NotifyIcon`，故工程开启 `UseWindowsForms`）提供
-  打开 TokenView / 立即同步 / 重启 TokenView / 退出，双击打开；采集中禁用"立即同步"并显示进行中；
+  打开 TokenView / 立即同步 / 重启 TokenView / 退出，左键单击或双击托盘图标打开主窗口；采集中禁用"立即同步"并显示进行中；
   重启先拉起带 `--restart-wait <pid>` 的新实例，等待旧进程退出后接管，旧实例按正常退出流程等待同步完成；
   tooltip 为今日 Token 与请求数摘要（截断到 63 字符），只含聚合值。
 - **关闭行为**：`CloseBehavior` = 询问 / 托盘 / 退出，默认询问；`CloseWindowDialog` 可记住选择。

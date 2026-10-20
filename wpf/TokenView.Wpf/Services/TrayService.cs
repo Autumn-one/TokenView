@@ -39,7 +39,14 @@ public sealed class TrayService : IDisposable
             ContextMenuStrip = menu,
             Visible = true,
         };
-        _icon.DoubleClick += (_, _) => ShowRequested?.Invoke();
+        // 左键单击即打开主窗口；右键留给菜单，MouseClick 也会为右键触发。
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == Forms.MouseButtons.Left)
+            {
+                ShowRequested?.Invoke();
+            }
+        };
         _icon.BalloonTipClicked += (_, _) => UpdateRequested?.Invoke();
     }
 
