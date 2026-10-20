@@ -32,7 +32,7 @@ AI 编程客户端的会话元数据，写入本地 SQLite 用量库，再聚合
 MainWindow / SettingsWindow / SessionLedgerWindow / SessionDetailWindow / CloseWindowDialog / AnnouncementWindow
         │（视图状态、格式化、事件转发）
         ├──→ Services：SyncService、SyncSchedule、TrayService、ThemeManager、WindowTheme、
-        │              AutostartService、WindowStateStore、StorageRelocationService、UpdateService、
+        │              AutostartService、WindowStateStore、StorageRelocationService、UpdateService、UpdateInstaller、
         │              AnnouncementService、AboutInfoService、MirrorContentService
         └──→ Data：TokenViewDatabase（只读查询）、TokenFormatting
                     │
@@ -42,7 +42,7 @@ Controls：RequestLineChart ──→ Data（ChartPoint / ChartMetric / TokenFor
 
 Services：SyncService ──→ Data.Collectors.SyncEngine ──→ 各 *Collector ──→ Data.Usage.UsageStore
           StorageRelocationService ──→ Data.Collectors（来源路径校验）＋ Settings
-          ThemeManager / AutostartService ──→ Settings；WindowStateStore / UpdateService ──→ 无领域依赖
+          ThemeManager / AutostartService ──→ Settings；WindowStateStore / UpdateService / UpdateInstaller ──→ 无领域依赖
           AnnouncementService / AboutInfoService ──→ IContentFetcher ←── MirrorContentService
           MirrorContentService ──→ MirrorsConfig / MirrorUrl；两者只暴露内存状态与 Changed 事件
 
@@ -52,8 +52,9 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
 ```
 
 - 公告与关于的网络访问只集中在 `MirrorContentService`（`IContentFetcher` 的唯一实现），
-  更新检查只集中在 `UpdateService`；两个内容状态服务只缓存内存结果并触发事件，
-  窗口不直接调用 `HttpClient`，也不自行解析 Markdown 之外的远程内容。
+  更新检查、下载与校验集中在 `UpdateService`，文件替换由 `UpdateInstaller` 生成本机 PowerShell
+  助手执行；两个内容状态服务只缓存内存结果并触发事件，窗口不直接调用 `HttpClient`，
+  也不自行解析 Markdown 之外的远程内容。
 
 硬性约束：
 
@@ -112,7 +113,7 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
 | `wpf/TokenView.Wpf/Data/`                    | `TokenViewDatabase`（区间构造、总览 / 总账 / 会话详情 / 客户端统计查询、今日托盘摘要）、`TokenFormatting`                                                                                                                                                    | 只读查询与展示格式化；不写库、不读客户端文件                                                 |
 | `wpf/TokenView.Wpf/Data/Collectors/`         | `SyncEngine`、`CollectorContracts`（`IClientCollector` / `SyncReport` / `SyncException` / `SyncBatch` / `SyncProgress`）、`CollectorSupport`、`SqliteSnapshot`、`RequestBuilder`、18 个 `*Collector`                                                        | 发现、解析、归一化入口、同步协调；只写 `UsageStore` API                                      |
 | `wpf/TokenView.Wpf/Data/Usage/`              | `UsageModels`（`SessionRecord` / `MessageRecord` / `SourceFile` / `UsageIds` / `UsageTime`）、`NormalizedUsage`（`RawTokenCounts` / `TokenBuckets` / `UsageNormalizer`）、`TokenSemantics`（`TokenSemanticsCatalog`）、`UsageStore`（迁移、写入、快照、预聚合） | 统一数据模型、Token 语义、SQLite 存储；纯领域逻辑，可用合成数据验证                          |
-| `wpf/TokenView.Wpf/Services/`                | `SyncService`、`SyncSchedule`、`TrayService`、`ThemeManager`、`WindowTheme`、`AutostartService`、`WindowStateStore`、`LegacyStorageMigration`、`StorageRelocationService`、`UpdateService`、`MirrorContentService`（唯一 HTTP 层）、`AnnouncementService`、`AboutInfoService`、`MirrorsConfig` / `MirrorUrl` / `SourceConfig` / `RepoConfig` | 桌面生命周期、调度、存储迁移、更新与公开 Markdown 拉取                                           |
+| `wpf/TokenView.Wpf/Services/`                | `SyncService`、`SyncSchedule`、`TrayService`、`ThemeManager`、`WindowTheme`、`AutostartService`、`WindowStateStore`、`LegacyStorageMigration`、`StorageRelocationService`、`UpdateService`、`UpdateInstaller`、`MirrorContentService`（唯一 HTTP 层）、`AnnouncementService`、`AboutInfoService`、`MirrorsConfig` / `MirrorUrl` / `SourceConfig` / `RepoConfig` | 桌面生命周期、调度、存储迁移、更新下载/替换与公开 Markdown 拉取                                  |
 | `wpf/TokenView.Wpf/Controls/`                | `RequestLineChart`（自绘折线）、`DailyStripPanel`（等宽逐日条布局）、`DateTimeRangePicker`（锚定浮层 + 自绘双月日历）、`MarkdownView`（Markdig AST → FlowDocument）                                                                                          | 可视组件；图表只绘制传入的数据点，不自行聚合；Markdown 不执行 HTML/脚本                       |
 | `wpf/TokenView.Wpf/Settings/`                | `AppSettings`（含 `AllClients`、`CloseBehavior`、`AppTheme`、`TokenDisplay`）、`SettingsStore`（`schemaVersion` 信封、原子保存、值归一化、顶层 `lastReadAnnouncementHash`）                                                                                    | `settings.json` 读写；与统计库分离                                                           |
 | `wpf/TokenView.Wpf/Assets/`                  | `app-icon.svg`（图标源）、`tokenview.ico`（`ApplicationIcon`，随构建输出）                                                                                                                                                                                  | 仅图标资源                                                                                   |
@@ -202,12 +203,15 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   （仅 0 / 1 / 5 / 15 / 30，非法值归一化为 5）判定到期；`CollectionPaused` 时不调度、
   不手动触发；`SyncOnStart` 控制启动即采集。`SyncService` 用信号量保证同一时刻只有一个批次，
   在后台线程独立开库连接串行执行各采集器，进度与完成通过事件回到 UI 线程。
-- **更新检查**：`UpdateService` 只访问固定端点
-  `https://github.com/MY-Final/TokLens/releases/latest/download/latest.json`，15 秒超时，
-  比较 `version` 与程序集版本；发现新版只提示并打开官方下载页（`UseShellExecute`），
-  **不下载、不安装**。唯一入口是设置 · 更新（手动按钮每次都反馈结果）；默认关闭自动检查，
-  开启后按 `settings.json` 的 `lastUpdateCheckMs` 限制每天最多一次，命中时用托盘气泡提示版本，
-  由 `TrayService.UpdateRequested` 交给宿主打开下载页，检查失败静默并在下个周期重试。发布流程见 `docs/releases.md`。
+- **更新检查与自动更新**：`UpdateService` 只访问固定端点
+  `https://github.com/Autumn-one/TokenView/releases/latest/download/latest.json`，15 秒超时，
+  比较 `version` 与程序集版本。发现新版后，`UpdateInstaller` 只从同一仓库的
+  `releases/download/` HTTPS 地址下载，按 `latest.json` 的 `sha256` 校验后解压到临时目录；
+  用户点击“重启并更新”后，临时 PowerShell 助手等待进程退出、备份当前文件、覆盖并重启，
+  失败时自动恢复旧文件。不静默覆盖运行中的程序，也不接受第三方下载地址。唯一入口是设置 · 更新
+  （手动按钮每次都反馈结果）；默认关闭自动更新，开启后按 `settings.json` 的 `lastUpdateCheckMs`
+  限制每天最多一次，命中时自动下载并用托盘气泡提示重启，检查或下载失败静默并在下个周期重试。
+  发布流程见 `docs/releases.md`。
 - **公告与关于信息**：`App` 启动时拉取一次公告并按 20 分钟 `DispatcherTimer` 刷新，退出时取消在途请求；
   `AnnouncementService` 与 `AboutInfoService` 只持有内存结果与 `Changed` 事件，实际请求集中在
   `MirrorContentService`（`IContentFetcher` 的唯一实现）。`MirrorsConfig` 内置固定的配置源与内容源
@@ -311,9 +315,10 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 
 | 日期       | 决策                                                                                    | 状态   | 理由 / 影响                                                                                                              |
 | ---------- | --------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
-| 2026-10-20 | 产品标识、程序集、命名空间与本地存储统一为 TokenView                                      | 已采纳 | 程序集 `TokenView.Wpf`；数据目录 `com.tokenview.app`、库 `tokenview-usage.sqlite3`；首次启动迁移旧 TokLens 自有文件，失败回退旧布局；GitHub 仓库与更新端点保留 `TokLens` 名 |
-| 2026-10-20 | WPF 成为唯一实现，移除原 WebView 版桌面应用与其工具链与发布脚本                          | 已采纳 | 常驻内存与工作集显著下降、单一技术栈、无跨语言双份实现；代价是应用内下载 / 安装与签名校验暂缺，更新改为只提示并打开下载页，多平台发布与自动化签名流水线随之取消，仅保留 Windows x64 |
-| 2026-10-20 | 更新检查保持固定 GitHub `latest.json` 端点，用户触发或每日一次，不自动下载安装           | 已采纳 | 与移除前的隐私承诺一致；无签名校验前不做应用内安装，避免不可验证的制品写入本机                                            |
+| 2026-10-20 | 更新改为「自动下载 + SHA-256 校验 + 用户确认重启安装」，发布走 GitHub Actions         | 已采纳 | 仅接受 `Autumn-one/TokenView` 的 HTTPS Release 资产；更新包必须带 `sha256`；独立 PowerShell 助手等待退出后备份、覆盖、重启，失败恢复旧文件；不静默覆盖运行中的程序 |
+| 2026-10-20 | 产品标识、程序集、命名空间与本地存储统一为 TokenView                                      | 已采纳 | 程序集 `TokenView.Wpf`；数据目录 `com.tokenview.app`、库 `tokenview-usage.sqlite3`；首次启动迁移旧 TokLens 自有文件，失败回退旧布局；GitHub 仓库已迁移到 `Autumn-one/TokenView` |
+| 2026-10-20 | WPF 成为唯一实现，移除原 WebView 版桌面应用与其工具链与发布脚本                          | 已采纳 | 常驻内存与工作集显著下降、单一技术栈、无跨语言双份实现；当时更新只提示并打开下载页，后续由 2026-10-20 自动更新决策取代，多平台发布流水线取消，仅保留 Windows x64 |
+| 2026-10-20 | 更新检查保持固定 GitHub `latest.json` 端点，用户触发或每日一次，不自动下载安装           | 已被取代 | 由同日「自动下载 + SHA-256 校验 + 用户确认重启安装」决策取代；固定端点、每日限频与本地优先原则保留 |
 | 2026-10-20 | 公告与关于页从固定公开镜像列表拉取 Markdown，Markdig 渲染，正文只存内存                  | 已采纳 | 启动一次 + 每 20 分钟；12 秒/请求、512 KiB 上限、原始字节 SHA-256、HTML 错误页拒绝；只持久化已读哈希；新增 Markdig 0.40.0 与 xUnit 测试项目，无 schema / 统计口径变化 |
 | 2026-10-20 | 采集写库改「单事务 + 惰性会话序列」，GC 固定 `ConserveMemory=5`，`mmap_size` 降到 32 MB   | 已采纳 | 峰值与常驻从「整客户端物化 + 高水位」改为流式；`Probe` 实测 Codex 峰值 147→103 MB、DSH 340→179 MB，耗时无回归；无 schema 与统计口径变化 |
 | 2026-10-19 | 自定义时间范围使用锚定浮层 + 自绘双月日历（`DateTimeRangePicker`）                       | 已采纳 | 无第三方日期控件依赖；确认后区间固定，编辑草稿不随时钟刷新；无 schema 与口径变化                                          |

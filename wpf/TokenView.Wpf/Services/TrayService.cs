@@ -68,6 +68,15 @@ public sealed class TrayService : IDisposable
         _icon.ShowBalloonTip(8000);
     }
 
+    /// <summary>更新包已下载并校验完成，等待用户确认重启。</summary>
+    public void ShowUpdateReadyBalloon(string version)
+    {
+        _icon.BalloonTipTitle = "TokenView 更新已就绪";
+        _icon.BalloonTipText = $"v{version} 已下载并校验，点击重启完成更新。";
+        _icon.BalloonTipIcon = Forms.ToolTipIcon.Info;
+        _icon.ShowBalloonTip(8000);
+    }
+
     public void Dispose()
     {
         _icon.Visible = false;

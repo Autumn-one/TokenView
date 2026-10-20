@@ -19,7 +19,10 @@ was removed from the working tree; a complete snapshot remains in the
 - Explicit separation of measured, derived, estimated, unknown, and partial data.
 - Local data clearing, configurable source collection, and statistics/settings storage relocation.
 - Dark and light themes, tray integration, autostart, and configurable sync schedules.
-- User-triggered update checks against the fixed GitHub Releases `latest.json` endpoint.
+- Update checks against the fixed GitHub Releases `latest.json` endpoint, with optional daily
+  automatic download and SHA-256-verified restart installation.
+- GitHub Actions release workflow: pushing a `v*` tag tests, publishes, packages, and uploads the
+  Windows zip plus `latest.json`.
 - Remote announcement (startup + every 20 minutes) and About-page dynamic info, fetched as Markdown
   from a fixed list of public mirrors, cached in memory only, with persistent unread state.
 

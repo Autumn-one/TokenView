@@ -96,13 +96,25 @@ public partial class MainWindow : Window
             TriggerSync(false);
         };
         _tray.ExitRequested += () => ((App)Application.Current).ExitApplication();
-        _tray.UpdateRequested += OpenPendingUpdatePage;
+        _tray.UpdateRequested += ApplyOrOpenPendingUpdate;
         _tray.SetRunning(SyncService.Current.IsRunning);
     }
 
-    private void OpenPendingUpdatePage()
+    private void ApplyOrOpenPendingUpdate()
     {
-        var url = _pendingUpdateUrl ?? "https://github.com/MY-Final/TokLens/releases/latest";
+        if (_pendingUpdate is not null)
+        {
+            try
+            {
+                UpdateInstaller.Launch(_pendingUpdate, () => ((App)Application.Current).ExitApplication());
+                return;
+            }
+            catch
+            {
+                // 写入失败时退回下载页，避免用户没有可见反馈。
+            }
+        }
+        var url = _pendingUpdateUrl ?? UpdateService.ReleasePage;
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 
@@ -437,6 +449,7 @@ public partial class MainWindow : Window
 
     private bool _updateChecking;
     private string? _pendingUpdateUrl;
+    private PreparedUpdate? _pendingUpdate;
 
     private async Task CheckForUpdatesIfDueAsync()
     {
@@ -451,7 +464,16 @@ public partial class MainWindow : Window
             SettingsStore.SaveLastUpdateCheck(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             if (info is null) return;
             _pendingUpdateUrl = info.DownloadUrl;
-            _tray?.ShowUpdateBalloon(info.Version);
+            try
+            {
+                _pendingUpdate = await UpdateInstaller.DownloadAndPrepareAsync(info, null, CancellationToken.None);
+                _tray?.ShowUpdateReadyBalloon(info.Version);
+            }
+            catch
+            {
+                // 自动下载失败时仍提示新版本，点击退回下载页。
+                _tray?.ShowUpdateBalloon(info.Version);
+            }
         }
         catch
         {

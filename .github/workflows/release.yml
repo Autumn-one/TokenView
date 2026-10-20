@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content "wpf/TokenView.Wpf/TokenView.Wpf.csproj"
+          $version = @($project.Project.PropertyGroup.Version | Where-Object { $_ })[0]
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match csproj version v$version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: dotnet test wpf/TokenView.Tests/TokenView.Tests.csproj -c Release
+
+      - name: Publish
+        run: >
+          dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:DebugType=None -p:DebugSymbols=false
+          -o release-assets/app
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zip = "release-assets/TokenView-$version-win-x64.zip"
+          Compress-Archive -Path "release-assets/app/*" -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Generate latest.json
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+          $repo = "${{ github.repository }}"
+          $zip = "TokenView-$version-win-x64.zip"
+          $notes = if (Test-Path "RELEASE_NOTES.md") {
+            (Get-Content "RELEASE_NOTES.md" -Raw).Trim()
+          } else {
+            "TokenView $version"
+          }
+          $document = [ordered]@{
+            version = $version
+            notes = $notes
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                url = "https://github.com/$repo/releases/download/$tag/$zip"
+                sha256 = "${{ steps.package.outputs.sha256 }}"
+              }
+            }
+          }
+          $document | ConvertTo-Json -Depth 5 | Set-Content "release-assets/latest.json" -Encoding utf8
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: TokenView ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            ${{ steps.package.outputs.zip }}
+            release-assets/latest.json

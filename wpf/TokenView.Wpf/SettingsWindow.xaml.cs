@@ -72,6 +72,9 @@ public partial class SettingsWindow : Window
         PausedCheck.IsChecked = _settings.CollectionPaused;
         SyncOnStartCheck.IsChecked = _settings.SyncOnStart;
         AutomaticUpdatesCheck.IsChecked = _settings.AutomaticUpdates;
+        DownloadUpdateButton.Visibility = Visibility.Collapsed;
+        InstallUpdateButton.Visibility = Visibility.Collapsed;
+        _preparedUpdate = null;
 
         BuildClientList();
 
@@ -479,11 +482,16 @@ public partial class SettingsWindow : Window
     }
 
     private UpdateInfo? _update;
+    private PreparedUpdate? _preparedUpdate;
 
     private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
     {
         CheckUpdateButton.IsEnabled = false;
         UpdateResultText.Text = "正在检查更新…";
+        _update = null;
+        _preparedUpdate = null;
+        DownloadUpdateButton.Visibility = Visibility.Collapsed;
+        InstallUpdateButton.Visibility = Visibility.Collapsed;
         try
         {
             _update = await UpdateService.CheckAsync();
@@ -493,7 +501,6 @@ public partial class SettingsWindow : Window
             if (_update is null)
             {
                 UpdateResultText.Text = $"已是最新版本（v{UpdateService.CurrentVersion}）。";
-                DownloadUpdateButton.Visibility = Visibility.Collapsed;
             }
             else
             {
@@ -501,7 +508,9 @@ public partial class SettingsWindow : Window
                     ? ""
                     : $"\n{_update.Notes!.Trim()}";
                 UpdateResultText.Text = $"发现新版本 v{_update.Version}。{notes}";
-                DownloadUpdateButton.Visibility = Visibility.Visible;
+                DownloadUpdateButton.Visibility = _update.DownloadUrl is null
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
             }
         }
         catch (Exception error)
@@ -514,10 +523,45 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void DownloadUpdate_Click(object sender, RoutedEventArgs e)
+    private async void DownloadUpdate_Click(object sender, RoutedEventArgs e)
     {
-        if (_update?.DownloadUrl is not { } url) return;
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        if (_update is null) return;
+        DownloadUpdateButton.IsEnabled = false;
+        UpdateResultText.Text = "正在下载并校验更新包…";
+        try
+        {
+            _preparedUpdate = await UpdateInstaller.DownloadAndPrepareAsync(_update, null, CancellationToken.None);
+            UpdateResultText.Text =
+                $"v{_update.Version} 已下载并校验通过，点击“重启并更新”完成安装。";
+            DownloadUpdateButton.Visibility = Visibility.Collapsed;
+            InstallUpdateButton.Visibility = Visibility.Visible;
+        }
+        catch (Exception error)
+        {
+            UpdateResultText.Text = $"下载更新失败：{error.Message}";
+        }
+        finally
+        {
+            DownloadUpdateButton.IsEnabled = true;
+        }
+    }
+
+    private void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_preparedUpdate is null) return;
+        try
+        {
+            UpdateInstaller.Launch(_preparedUpdate, () => ((App)Application.Current).ExitApplication());
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(this, error.Message, "TokenView", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void OpenReleasePage_Click(object sender, RoutedEventArgs e)
+    {
+        Process.Start(new ProcessStartInfo(UpdateService.ReleasePage) { UseShellExecute = true });
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
