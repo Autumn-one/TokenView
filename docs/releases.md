@@ -43,11 +43,11 @@ https://github.com/Autumn-one/TokenView/releases/latest/download/latest.json
 
 ```json
 {
-  "version": "0.1.11",
+  "version": "0.1.12",
   "notes": "本次更新说明（纯文本，最多展示两条摘要）",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://github.com/Autumn-one/TokenView/releases/download/v0.1.11/TokenView-0.1.11-win-x64.zip",
+      "url": "https://github.com/Autumn-one/TokenView/releases/download/v0.1.12/TokenView-0.1.12-win-x64.zip",
       "sha256": "更新包 zip 的 SHA-256 十六进制小写值"
     }
   }
