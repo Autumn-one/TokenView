@@ -25,9 +25,8 @@ WorkBuddy、GitHub Copilot、Gemini CLI、Grok CLI、MCode、Devin、Command Cod
 
 当前仓库状态：**C# / .NET 10 / WPF 是唯一实现**，位于 `wpf/TokenView.Wpf`；`wpf/TokenView.Probe`
 是无界面的采集/查询验证工具，`wpf/TokenView.Tests` 是 xUnit 测试项目。程序集、命名空间、数据目录
-与库文件统一使用 TokenView；首次启动会把旧版 TokLens 自有数据迁移到新目录，GitHub 仓库地址仍沿用
-`TokLens`。原 Tauri + React + Rust 实现已从工作区移除，完整快照保存在
-`backup/webview-2026-10-19` 分支，仅用于历史对照，不再维护、不参与构建。
+与库文件统一使用 TokenView；首次启动会把旧版自有数据迁移到新目录。原 Tauri + React + Rust 实现已从
+工作区移除，完整快照保存在 `backup/webview-2026-10-19` 分支，仅用于历史对照，不再维护、不参与构建。
 
 公告与关于页动态信息已接入：启动时及每 20 分钟按固定镜像列表拉取公开的 `mirrors.json`、`README.md`
 与 `info.md`，用 Markdig 渲染为 WPF FlowDocument；正文只在内存，仅持久化 `lastReadAnnouncementHash`。
@@ -135,7 +134,7 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 ## 7. 测试与验证
 
 现状：`wpf/TokenView.Tests` 使用 xUnit（已登记于 `docs/architecture.md`），覆盖公告/关于的镜像获取、
-配置合并、哈希、未读持久化、一次性加载、旧版 TokLens 存储迁移与更新包解析/下载校验；测试只使用假
+配置合并、哈希、未读持久化、一次性加载、旧版存储迁移与更新包解析/下载校验；测试只使用假
 `HttpMessageHandler` / `TimeProvider` 与临时目录，不访问真实网络、不依赖当前时间、不触碰真实 AppData。
 新增可测试逻辑时补相应用例；测试数据只用合成内容，不要为了"看起来有测试"而创建无断言的占位测试。
 

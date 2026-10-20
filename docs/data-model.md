@@ -116,7 +116,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 
 库位置：`<当前存储目录>/tokenview-usage.sqlite3`，初始默认在 Windows 为 `%APPDATA%\com.tokenview.app\`，可从设置迁移到用户指定目录。
 系统应用目录保留小型 `storage-location.json`，统计数据库与 `settings.json` 迁移后在新目录使用。位置迁移不改变 schema、统计口径、去重键或采集水位。
-旧版 TokLens 目录（`%APPDATA%\com.toklens.app` 与 `toklens-usage.sqlite3`）在首次启动时一次性迁移为新名；只复制不删除旧文件，失败则继续使用旧布局并在下次启动重试。
+旧版应用目录（`%APPDATA%\com.toklens.app` 与 `toklens-usage.sqlite3`）在首次启动时一次性迁移为新名；只复制不删除旧文件，失败则继续使用旧布局并在下次启动重试。
 与客户端自身的数据库分离：只读客户端库、只写 TokenView 自有文件，不向客户端来源目录写入。
 迁移由 `schema_migrations` 记录，`PRAGMA user_version` 同步冗余。连接统一设置
 `foreign_keys=ON`、`journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=5000`。

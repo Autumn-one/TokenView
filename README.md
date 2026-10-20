@@ -1,14 +1,26 @@
 # TokenView
 
+**English** | [简体中文](README.zh-CN.md)
+
 TokenView is a local-first Windows desktop app for analyzing usage metadata from AI coding clients.
 It stores data in a local SQLite database, reads client data without modifying it, and never uploads
 usage data or includes telemetry. The only outbound requests are the fixed update check and the
 public announcement/About mirrors described below. The assembly, data directory, database, and
-settings file all use the TokenView name; the GitHub repository keeps its original `TokLens` name.
+settings file all use the TokenView name.
+
+![TokenView overview](docs/images/overview.png)
 
 The current implementation is C# / .NET 10 / WPF. The earlier Tauri + React + Rust implementation
 was removed from the working tree; a complete snapshot remains in the
 `backup/webview-2026-10-19` branch for reference only.
+
+## Minimal by design
+
+TokenView is built around a deliberately minimal interface: a single window, one accent color, and
+flat cards where numbers and charts do the talking. There is no account, no feature sidebar, and no
+ads or upsell — open the app and usage is immediately on screen. The same sparse layout holds in
+light and dark themes and down to an 800×600 window. That restrained footprint matches the app
+itself: everything stays local, with no telemetry and no uploads.
 
 ## Features
 
@@ -76,7 +88,7 @@ wpf/TokenView.Wpf/        WPF desktop app
   Assets/               app icon and icon source
 wpf/TokenView.Probe/      headless sync/query/content verification tool
 wpf/TokenView.Tests/      xUnit tests for mirror fetching, config merge and read state
-docs/                   specifications and data-source research
+docs/                   specifications, data-source research, and README images
 scripts/                read-only database reconciliation helper
 ```
 

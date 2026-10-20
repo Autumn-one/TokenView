@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace TokenView.Wpf.Services;
 
 /// <summary>
-/// 把 TokLens 时代的自有数据一次性迁到 TokenView 命名的目录与库文件。
+/// 把旧版应用的本地数据一次性迁到 TokenView 命名的目录与库文件。
 /// 只复制、不删除旧文件；失败时保留旧布局，由 StoragePaths 回退。
 /// </summary>
 public static class LegacyStorageMigration
