@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>TokenView</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123B33" />
+      <stop offset="1" stop-color="#07130F" />
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12" />
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.46" r="0.42">
+      <stop offset="0" stop-color="#45c7a4" stop-opacity="0.16" />
+      <stop offset="1" stop-color="#45c7a4" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#EAFFF9" />
+      <stop offset="1" stop-color="#8BEBD2" />
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#tile)" />
+  <rect width="1024" height="1024" rx="232" fill="url(#glow)" />
+  <rect width="1024" height="1024" rx="232" fill="url(#gloss)" />
+  <rect
+    x="6"
+    y="6"
+    width="1012"
+    height="1012"
+    rx="226"
+    fill="none"
+    stroke="#ffffff"
+    stroke-opacity="0.12"
+    stroke-width="10"
+  />
+  <rect x="312" y="238" width="400" height="104" rx="52" fill="url(#mark)" />
+  <rect x="460" y="342" width="104" height="440" rx="52" fill="url(#mark)" />
+</svg>

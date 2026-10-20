@@ -1,0 +1,6 @@
+# 统一使用 LF 换行，避免 Windows / 其他平台之间的换行差异。
+* text=auto eol=lf
+
+# 二进制资源（应用图标）
+*.png binary
+*.ico binary

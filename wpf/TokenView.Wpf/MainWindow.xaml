@@ -1,0 +1,640 @@
+<Window x:Class="TokenView.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:TokenView.Wpf.Controls"
+        xmlns:local="clr-namespace:TokenView.Wpf"
+        Title="TokenView" Height="860" Width="1200" MinHeight="640" MinWidth="1000"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource WindowBrush}"
+        FontFamily="Microsoft YaHei UI"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
+    <Window.Resources>
+        <local:HexToBrushConverter x:Key="HexToBrush" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <Style x:Key="GridHeader" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="54" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid Grid.Row="0" Margin="24,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <RadioButton x:Name="RangeToday" Tag="today" Content="今天" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="Range7d" Tag="7d" Content="7 天" GroupName="Range" IsChecked="True"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="RangeWeek" Tag="week" Content="本周" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="Range30d" Tag="30d" Content="30 天" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="RangeMonth" Tag="month" Content="本月" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="Range90d" Tag="90d" Content="90 天" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <RadioButton x:Name="RangeAll" Tag="all" Content="全部" GroupName="Range"
+                             Style="{DynamicResource RangeRadio}" Checked="Range_Checked" />
+                <Button x:Name="CustomRangeButton" Style="{DynamicResource LinkButton}" Height="28"
+                        Padding="9,4" Margin="4,0,0,0" Click="CustomRange_Click"
+                        AutomationProperties.Name="自定义时间范围"
+                        FocusVisualStyle="{x:Null}" ToolTip="选择自定义时间范围">
+                    <StackPanel Orientation="Horizontal">
+                        <Viewbox Width="14" Height="14">
+                            <Canvas Width="24" Height="24">
+                                <Path x:Name="CustomRangeIcon" Data="M4,5 H20 V21 H4 Z M4,10 H20 M8,3 V7 M16,3 V7"
+                                      Stroke="{DynamicResource MutedBrush}" StrokeThickness="1.8"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+                            </Canvas>
+                        </Viewbox>
+                        <TextBlock Text="自定义" FontSize="12" Margin="6,0,0,0"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                        HorizontalAlignment="Right">
+                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource AccentBrush}"
+                         VerticalAlignment="Center" Margin="0,0,7,0" />
+                <TextBlock x:Name="StatusText" Text="已同步" Style="{DynamicResource MutedText}"
+                           Width="140" VerticalAlignment="Center" Margin="0,0,10,0"
+                           TextTrimming="CharacterEllipsis"
+                           MouseLeftButtonUp="StatusText_Click" />
+                <Button x:Name="RefreshButton" Style="{DynamicResource IconButton}" Click="Refresh_Click"
+                        ToolTip="刷新数据">
+                    <TextBlock Text="↻" FontSize="18" FontWeight="SemiBold" />
+                </Button>
+                <Grid Margin="4,0,0,0">
+                    <Button x:Name="AnnouncementButton" Style="{DynamicResource IconButton}"
+                            Click="Announcement_Click" ToolTip="公告"
+                            AutomationProperties.Name="公告">
+                        <Viewbox Width="17" Height="17">
+                            <Canvas Width="24" Height="24">
+                                <Path Data="M12,3 C9.2,3 7,5.2 7,8 V13 L5,16 H19 L17,13 V8 C17,5.2 14.8,3 12,3 Z M10,19 C10,20.1 10.9,21 12,21 C13.1,21 14,20.1 14,19"
+                                      Stroke="{DynamicResource MutedBrush}" StrokeThickness="1.8"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round" />
+                            </Canvas>
+                        </Viewbox>
+                    </Button>
+                    <Border x:Name="AnnouncementUnreadDot" Width="7" Height="7" CornerRadius="3.5"
+                            Background="{DynamicResource AccentBrush}" HorizontalAlignment="Right"
+                            VerticalAlignment="Top" Margin="0,4,4,0" Visibility="Collapsed"
+                            IsHitTestVisible="False" />
+                </Grid>
+                <Button x:Name="AboutButton" Style="{DynamicResource IconButton}" Click="About_Click"
+                        ToolTip="关于" Margin="4,0,0,0" AutomationProperties.Name="关于">
+                    <Viewbox Width="17" Height="17">
+                        <Canvas Width="24" Height="24">
+                            <Path Data="M12,3.5 A8.5,8.5 0 1,1 11.99,3.5 M12,10.5 V17 M12,7.2 V7.3"
+                                  Stroke="{DynamicResource MutedBrush}" StrokeThickness="1.8"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  StrokeLineJoin="Round" />
+                        </Canvas>
+                    </Viewbox>
+                </Button>
+                <Button x:Name="SettingsButton" Style="{DynamicResource IconButton}" Click="Settings_Click"
+                        ToolTip="设置" Margin="4,0,0,0">
+                    <TextBlock Text="⚙" FontSize="17" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer x:Name="PageScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="24,12,24,24">
+                <Border Style="{DynamicResource CardStyle}">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="UsageTitle" Text="请求用量" Style="{DynamicResource CardTitle}"
+                                       VerticalAlignment="Center" />
+                            <TextBlock x:Name="RangeDaysText" Grid.Column="1"
+                                       Style="{DynamicResource MutedText}"
+                                       Margin="8,0,12,0" VerticalAlignment="Center" />
+                            <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                        HorizontalAlignment="Right" VerticalAlignment="Top">
+                                <RadioButton x:Name="MetricTokens" Content="Token" GroupName="Metric" IsChecked="True"
+                                             Style="{DynamicResource RangeRadio}" Checked="Metric_Checked" />
+                                <RadioButton x:Name="MetricRequests" Content="请求数" GroupName="Metric"
+                                             Style="{DynamicResource RangeRadio}" Checked="Metric_Checked" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="已知 Token" Style="{DynamicResource StatLabel}" />
+                                <TextBlock x:Name="TokensValue" Text="—" Style="{DynamicResource StatValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="请求数" Style="{DynamicResource StatLabel}" />
+                                <TextBlock x:Name="RequestsValue" Text="—" Style="{DynamicResource StatValue}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="会话数" Style="{DynamicResource StatLabel}" />
+                                <TextBlock x:Name="SessionsValue" Text="—" Style="{DynamicResource StatValue}" />
+                            </StackPanel>
+                        </Grid>
+
+                        <Grid Height="250" Margin="0,14,0,0" Panel.ZIndex="10">
+                            <controls:RequestLineChart x:Name="LineChart"
+                                                       Accent="{DynamicResource AccentBrush}"
+                                                       GridBrush="{DynamicResource ChartGridBrush}"
+                                                       MutedBrush="{DynamicResource MutedBrush}"
+                                                       MouseMove="LineChart_MouseMove"
+                                                       MouseLeave="LineChart_MouseLeave" />
+                            <Canvas x:Name="ChartOverlay">
+                                <Border x:Name="ChartTooltip" Visibility="Collapsed"
+                                        Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                        BorderThickness="1" CornerRadius="8" Padding="12" MinWidth="210"
+                                        MaxWidth="320"
+                                        MouseEnter="ChartTooltip_MouseEnter"
+                                        MouseLeave="ChartTooltip_MouseLeave">
+                                    <StackPanel>
+                                        <TextBlock x:Name="TooltipTitle" FontSize="12" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap" />
+                                        <TextBlock x:Name="TooltipTokens" FontSize="11" Margin="0,6,0,0"
+                                                   Foreground="{DynamicResource TextBrush}" />
+                                        <TextBlock x:Name="TooltipRequests" FontSize="11" Margin="0,2,0,0"
+                                                   Foreground="{DynamicResource TextBrush}" />
+                                        <TextBlock x:Name="TooltipSessions" FontSize="11" Margin="0,2,0,0"
+                                                   Foreground="{DynamicResource TextBrush}" />
+                                        <TextBlock x:Name="TooltipUnknown" FontSize="11" Margin="0,2,0,0"
+                                                   Foreground="{DynamicResource MutedBrush}" />
+                                        <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
+                                            <Border Background="{DynamicResource ChipBrush}" CornerRadius="6"
+                                                    Padding="2">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <RadioButton x:Name="TooltipClientTab" Content="客户端"
+                                                                 GroupName="TooltipDimension"
+                                                                 Style="{DynamicResource TooltipTabRadio}"
+                                                                 IsChecked="True"
+                                                                 Checked="TooltipDimension_Checked" />
+                                                    <RadioButton x:Name="TooltipModelTab" Content="模型"
+                                                                 GroupName="TooltipDimension"
+                                                                 Style="{DynamicResource TooltipTabRadio}"
+                                                                 Checked="TooltipDimension_Checked" />
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+                                        <ItemsControl x:Name="TooltipBreakdown" Margin="0,6,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,4,0,0">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <local:ClientIcon ClientKey="{Binding ClientKey}"
+                                                                          IconSize="12"
+                                                                          IconBrush="{Binding ColorHex, Converter={StaticResource HexToBrush}}"
+                                                                          VerticalAlignment="Center" Margin="0,0,6,0" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="11"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   VerticalAlignment="Center"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   ToolTip="{Binding Label}" />
+                                                        <TextBlock Grid.Column="2" Text="{Binding ValueText}"
+                                                                   FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   VerticalAlignment="Center" Margin="12,0,0,0" />
+                                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                                                                   Text="{Binding UnknownText}" FontSize="10"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   Margin="0,1,0,0">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                    <Style.Triggers>
+                                                                        <Trigger Property="Text" Value="">
+                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                        </Trigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <ItemsControl x:Name="TooltipModelBreakdown" Margin="0,6,0,0"
+                                                      Visibility="Collapsed">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,4,0,0">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <local:ModelIcon Model="{Binding Model}" IconSize="12"
+                                                                         IconBrush="{DynamicResource MutedBrush}"
+                                                                         VerticalAlignment="Center" Margin="0,0,6,0" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding Model}"
+                                                                   FontSize="11"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   VerticalAlignment="Center"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   ToolTip="{Binding Model}" />
+                                                        <TextBlock Grid.Column="2" Text="{Binding ValueText}"
+                                                                   FontSize="11" FontWeight="SemiBold"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   VerticalAlignment="Center" Margin="12,0,0,0" />
+                                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                                                                   Text="{Binding UnknownText}" FontSize="10"
+                                                                   Foreground="{DynamicResource MutedBrush}"
+                                                                   Margin="0,1,0,0">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                    <Style.Triggers>
+                                                                        <Trigger Property="Text" Value="">
+                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                        </Trigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+                            </Canvas>
+                        </Grid>
+                        <ScrollViewer x:Name="DailyStripScroll"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
+                                      Margin="0,14,0,0"
+                                      PreviewMouseWheel="DailyStripScroll_PreviewMouseWheel"
+                                      SizeChanged="DailyStripScroll_SizeChanged">
+                            <ItemsControl x:Name="DailyStrip">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <controls:DailyStripPanel />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <TextBlock Text="{Binding Label}" Style="{DynamicResource MutedText}"
+                                                       HorizontalAlignment="Stretch" TextAlignment="Center" />
+                                            <TextBlock Grid.Row="1" Text="{Binding TokenText}" FontSize="12"
+                                                       FontWeight="SemiBold" TextAlignment="Center"
+                                                       Foreground="{DynamicResource TextBrush}" Margin="0,2,0,1" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{DynamicResource CardStyle}" Margin="0,16,0,0">
+                    <StackPanel>
+                        <Grid>
+                            <StackPanel>
+                                <TextBlock Text="客户端用量分布" Style="{DynamicResource CardTitle}" />
+                                <TextBlock Text="按请求发生日期 · 已知 Token" Style="{DynamicResource MutedText}"
+                                           Margin="0,3,0,0" />
+                            </StackPanel>
+                        </Grid>
+                        <ItemsControl x:Name="ClientUsageList" Margin="0,16,0,0">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="0,0,0,14">
+                                        <StackPanel Background="Transparent" Cursor="Hand"
+                                                    MouseLeftButtonUp="ClientUsage_Click"
+                                                    ToolTip="点击展开或收起该客户端的模型统计">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Grid Width="26" Height="26" Margin="0,0,8,0" VerticalAlignment="Center">
+                                                    <Border CornerRadius="7" Opacity="0.12"
+                                                            Background="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}" />
+                                                    <local:ClientIcon ClientKey="{Binding Client.Key}" IconSize="15"
+                                                                      IconBrush="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}"
+                                                                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                </Grid>
+                                                <TextBlock Grid.Column="1" Text="{Binding Client.Label}" FontSize="13"
+                                                           FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"
+                                                           VerticalAlignment="Center" />
+                                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Share, StringFormat={}{0:P1}}"
+                                                               Style="{DynamicResource MutedText}" VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding ExpandGlyph}" FontSize="10"
+                                                               Foreground="{DynamicResource MutedBrush}" Margin="8,0,0,0"
+                                                               VerticalAlignment="Center" />
+                                                </StackPanel>
+                                            </Grid>
+                                            <local:ShareBar Margin="18,7,0,5" Value="{Binding Share}"
+                                                            TrackBrush="{DynamicResource TrackBrush}"
+                                                            BarBrush="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}" />
+                                            <Grid Margin="18,0,0,0">
+                                                <TextBlock Text="{Binding SessionText}" Style="{DynamicResource MutedText}" />
+                                                <TextBlock Text="{Binding TokenText}" Style="{DynamicResource MutedText}"
+                                                           HorizontalAlignment="Right" />
+                                            </Grid>
+                                        </StackPanel>
+                                        <Border Margin="18,9,0,0" Padding="10,8" CornerRadius="8"
+                                                Background="{DynamicResource ChipBrush}"
+                                                Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}">
+                                            <StackPanel>
+                                                <TextBlock Text="模型 · 按请求归属 · 已知 Token"
+                                                           Style="{DynamicResource MutedText}" FontSize="10.5" />
+                                                <ItemsControl ItemsSource="{Binding Models}" Margin="0,6,0,0">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Border CornerRadius="5" Padding="6,3" Margin="0,1">
+                                                                <Border.Style>
+                                                                    <Style TargetType="Border">
+                                                                        <Setter Property="Background" Value="Transparent" />
+                                                                        <Style.Triggers>
+                                                                            <Trigger Property="IsMouseOver" Value="True">
+                                                                                <Setter Property="Background"
+                                                                                        Value="{DynamicResource RowHoverBrush}" />
+                                                                            </Trigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </Border.Style>
+                                                                <Grid>
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <StackPanel Orientation="Horizontal">
+                                                                        <local:ModelIcon Model="{Binding Name}" IconSize="12"
+                                                                                         IconBrush="{DynamicResource MutedBrush}"
+                                                                                         VerticalAlignment="Center"
+                                                                                         Margin="0,0,6,0" />
+                                                                        <TextBlock Text="{Binding Name}" FontSize="11.5"
+                                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                                   TextTrimming="CharacterEllipsis"
+                                                                                   VerticalAlignment="Center" />
+                                                                    </StackPanel>
+                                                                    <TextBlock Grid.Column="1" Text="{Binding RequestText}"
+                                                                               Style="{DynamicResource MutedText}"
+                                                                               FontSize="10.5" Margin="12,0,0,0"
+                                                                               VerticalAlignment="Center" />
+                                                                    <TextBlock Grid.Column="2" Text="{Binding TokenText}"
+                                                                               FontSize="11" FontWeight="SemiBold"
+                                                                               Foreground="{DynamicResource TextBrush}"
+                                                                               Margin="12,0,0,0" VerticalAlignment="Center" />
+                                                                    <TextBlock Grid.Column="3" Text="{Binding ShareText}"
+                                                                               Style="{DynamicResource MutedText}"
+                                                                               FontSize="10.5" MinWidth="46"
+                                                                               TextAlignment="Right" Margin="10,0,0,0"
+                                                                               VerticalAlignment="Center" />
+                                                                </Grid>
+                                                            </Border>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock x:Name="NoClients" Text="暂无数据" Style="{DynamicResource MutedText}"
+                                   Visibility="Collapsed" />
+                    </StackPanel>
+                </Border>
+
+                <StackPanel Margin="0,20,0,0">
+                    <Grid Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Text="会话视角" Style="{DynamicResource SectionTitle}" />
+                            <TextBlock Text="按会话开始日筛选，展示整段会话累计；与上方按请求时间的总量不可直接对账。"
+                                       Style="{DynamicResource MutedText}" Margin="0,3,0,0" />
+                        </StackPanel>
+                        <Button Content="查看会话总账" Style="{DynamicResource LinkButton}"
+                                HorizontalAlignment="Right" VerticalAlignment="Top" Click="Ledger_Click" />
+                    </Grid>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="16" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Style="{DynamicResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="模型排行" Style="{DynamicResource CardTitle}" />
+                                <TextBlock Text="会话主模型 · Top 5" Style="{DynamicResource MutedText}" Margin="0,3,0,12" />
+                                <ItemsControl x:Name="ModelRanking">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="0,0,0,10">
+                                                <Grid>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <local:ModelIcon Model="{Binding Name}" IconSize="13"
+                                                                         IconBrush="{DynamicResource MutedBrush}"
+                                                                         VerticalAlignment="Center" Margin="0,0,6,0" />
+                                                        <TextBlock Text="{Binding Name}" FontSize="12"
+                                                                   Foreground="{DynamicResource TextBrush}"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding TokenText}" Style="{DynamicResource MutedText}"
+                                                               HorizontalAlignment="Right" />
+                                                </Grid>
+                                                <local:ShareBar Value="{Binding Share}" Margin="0,5,0,0"
+                                                                TrackBrush="{DynamicResource TrackBrush}"
+                                                                BarBrush="{DynamicResource AccentBrush}" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="2" Style="{DynamicResource CardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="项目排行" Style="{DynamicResource CardTitle}" />
+                                <TextBlock Text="项目目录 · Top 5" Style="{DynamicResource MutedText}" Margin="0,3,0,12" />
+                                <ItemsControl x:Name="ProjectRanking">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="0,0,0,10">
+                                                <Grid>
+                                                    <TextBlock Text="{Binding Name}" FontSize="12"
+                                                               Foreground="{DynamicResource TextBrush}" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding TokenText}" Style="{DynamicResource MutedText}"
+                                                               HorizontalAlignment="Right" />
+                                                </Grid>
+                                                <local:ShareBar Value="{Binding Share}" Margin="0,5,0,0"
+                                                                TrackBrush="{DynamicResource TrackBrush}"
+                                                                BarBrush="{DynamicResource AccentBrush}" />
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <Border Style="{DynamicResource CardStyle}" Margin="0,16,0,0">
+                        <StackPanel>
+                            <TextBlock Text="最近会话" Style="{DynamicResource CardTitle}" />
+                            <TextBlock Text="按开始时间筛选 · 展示整段会话累计" Style="{DynamicResource MutedText}"
+                                       Margin="0,3,0,10" />
+                            <DataGrid x:Name="RecentSessionsGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                                      CanUserAddRows="False" CanUserResizeRows="False" CanUserReorderColumns="False"
+                                      HeadersVisibility="Column" GridLinesVisibility="None" RowHeaderWidth="0"
+                                      Background="Transparent" Foreground="{DynamicResource TextBrush}"
+                                      BorderThickness="0" RowHeight="38"
+                                      ColumnHeaderHeight="34" SelectionMode="Single"
+                                      MouseDoubleClick="RecentSessions_DoubleClick"
+                                      PreviewMouseWheel="RecentSessionsGrid_PreviewMouseWheel"
+                                      ColumnHeaderStyle="{StaticResource GridHeader}">
+                                <DataGrid.Resources>
+                                    <Style TargetType="DataGridCell">
+                                        <Setter Property="BorderThickness" Value="0" />
+                                        <Setter Property="Background" Value="Transparent" />
+                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                                        <Setter Property="Padding" Value="8,0" />
+                                        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                                    </Style>
+                                    <Style TargetType="DataGridRow">
+                                        <Setter Property="Background" Value="Transparent" />
+                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+                                        <Setter Property="BorderThickness" Value="0" />
+                                        <Style.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Background" Value="{DynamicResource HoverBrush}" />
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}" />
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGrid.Resources>
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="时间" Binding="{Binding Started}" Width="145" />
+                                    <DataGridTemplateColumn Header="客户端" Width="150">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                    <local:ClientIcon ClientKey="{Binding ClientKey}" IconSize="15"
+                                                                      IconBrush="{Binding ColorHex, Converter={StaticResource HexToBrush}}"
+                                                                      VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding ClientLabel}" Margin="8,0,0,0"
+                                                               Foreground="{DynamicResource TextBrush}" />
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn Header="模型" Width="155">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <local:ModelBadge Model="{Binding Model}" />
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="项目" Binding="{Binding Project}" Width="*" />
+                                    <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="请求" Binding="{Binding RequestsText}" Width="75" />
+                                    <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="Token" Binding="{Binding TokenText}" Width="90" />
+                                    <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="状态" Binding="{Binding Coverage}" Width="75" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="会话累计 · 按会话开始日 · 不含估算；明细不完整时仍展示会话累计值，未知总量不计入合计。"
+                               Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Popup x:Name="RangePopup"
+               PlacementTarget="{Binding ElementName=CustomRangeButton}"
+               Placement="Bottom"
+               VerticalOffset="8"
+               StaysOpen="True"
+               AllowsTransparency="True"
+               PopupAnimation="Fade"
+               Opened="RangePopup_Opened">
+            <Border Background="{DynamicResource CardBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="14"
+                    Padding="16"
+                    Margin="12">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="24" ShadowDepth="4" Opacity="0.18"
+                                      Color="#000000" />
+                </Border.Effect>
+                <controls:DateTimeRangePicker x:Name="RangePicker" />
+            </Border>
+        </Popup>
+
+        <Grid x:Name="LoadingOverlay" Grid.Row="1" Background="{DynamicResource WindowBrush}"
+              Visibility="Collapsed">
+            <StackPanel x:Name="LoadingSkeleton" Margin="24,4,24,24" Opacity="0.55">
+                <Border Style="{DynamicResource CardStyle}" Height="430">
+                    <StackPanel>
+                        <Border Height="16" Width="130" HorizontalAlignment="Left"
+                                Background="{DynamicResource ChipBrush}" CornerRadius="4" />
+                        <Border Height="42" Width="260" HorizontalAlignment="Left"
+                                Background="{DynamicResource ChipBrush}" CornerRadius="6" Margin="0,18,0,0" />
+                        <Border Height="230" Background="{DynamicResource ChipBrush}" CornerRadius="8"
+                                Margin="0,22,0,0" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{DynamicResource CardStyle}" Height="150" Margin="0,16,0,0">
+                    <StackPanel>
+                        <Border Height="16" Width="160" HorizontalAlignment="Left"
+                                Background="{DynamicResource ChipBrush}" CornerRadius="4" />
+                        <Border Height="60" Background="{DynamicResource ChipBrush}" CornerRadius="8"
+                                Margin="0,18,0,0" />
+                    </StackPanel>
+                </Border>
+                <TextBlock Text="正在读取本地统计…" Style="{DynamicResource MutedText}"
+                           HorizontalAlignment="Center" Margin="0,16,0,0" />
+            </StackPanel>
+        </Grid>
+
+    </Grid>
+</Window>

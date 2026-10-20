@@ -1,0 +1,31 @@
+# .NET / WPF 构建产物
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# 日志
+logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# .NET 测试结果
+TestResults/
+
+# 本地数据、密钥与发布产物
+*.key
+*.key.pub
+release-artifacts/
+release-assets/
+.playwright-mcp/
+
+# 编辑器与系统
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.sw?

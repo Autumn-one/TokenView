@@ -1,0 +1,653 @@
+# 数据来源调研：十八个本地 AI 编程客户端（18 个已接入）
+
+本文记录 TokenView 对本地 AI 编程客户端用量来源的**实际调研结果**：各客户端在本机（Windows）落地的数据来源、文件格式、
+可获取字段、口径与限制。本机数据检查全部为只读；新增客户端的部分格式结论同时参考公开资料，并在对应章节注明。
+
+## 0. 调研方法与合规说明
+
+- 环境：Windows，`%USERPROFILE%`；客户端版本：Codex CLI `0.162.0-alpha.17.2`、Claude Code `2.1.294`、OpenCode `1.18.35`。
+- 读取方式：全部**只读**。JSONL 用流式逐行解析；SQLite 使用 `file:<path>?mode=ro` 只读打开（不写、不建表、不 checkpoint WAL）。
+- 数据处理：只提取**元数据与数值字段**（时间戳、标识、模型名、token 计数、成本）。正文、提示词、工具输出、
+  会话标题、账号凭据一律不读取、不保存、不输出。路径在本文中脱敏为 `%USERPROFILE%`。
+- 本文出现的会话标识一律截断为前 8 位。
+- 原始数据未被修改（未写入、未移动、未删除任何客户端文件）。
+
+证据统计（本次实测）：
+
+| 数据源                                            | 文件数                       | 体量     | 覆盖时间                 |
+| ------------------------------------------------- | ---------------------------- | -------- | ------------------------ |
+| `%USERPROFILE%\.codex\sessions`                   | 353 个 rollout JSONL         | 988.5 MB | 2026-05-24 .. 2026-10-11 |
+| `%USERPROFILE%\.codex\archived_sessions`          | 24 个 rollout JSONL          | 8.5 MB   | 同上区间                 |
+| `%USERPROFILE%\.codex\state_5.sqlite`             | 1 个 SQLite                  | 2.8 MB   | 356 个线程               |
+| `%USERPROFILE%\.claude\projects`                  | 103 个文件（72 个 `.jsonl`） | 30.9 MB  | 2026-06-05 .. 2026-10-08 |
+| `%USERPROFILE%\.local\share\opencode\opencode.db` | 1 个 SQLite（WAL）           | 1 186 MB | 2026-08-10 .. 2026-10-09 |
+
+## 1. 结论摘要
+
+| 客户端      | 首选数据源                                             | 格式                             | 请求级 token 明细                                                    | 会话级聚合                                                | 项目维度                                                          | 成本                                  |
+| ----------- | ------------------------------------------------------ | -------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
+| Codex       | `state_5.sqlite` → `threads`；明细回落到 rollout JSONL | SQLite + JSONL（append-only）    | 有（`token_usage_record`，0.153.0+；更早为 `event_msg.token_count`） | 有（`tokens_used`，且 JSONL 有累计 `thread_token_usage`） | 有（`cwd`、`git_branch`、`git_origin_url`）                       | 无，需自建价格表                      |
+| Claude Code | `projects/**/*.jsonl`                                  | JSONL（append-only，含重复写入） | 有（`message.usage.*`）                                              | 无聚合表（需自行聚合；`.claude.json` 仅"最后一次会话"）   | 有（每行 `cwd`、`gitBranch`；目录名是 cwd 变形）                  | 无（仅 `.claude.json` 的 `lastCost`） |
+| OpenCode    | `opencode.db`                                          | SQLite（WAL）                    | 有（`message.data.tokens.*`）                                        | 有（`session` / `session_v2` 的 token 列与 `cost`）       | 有（`project.worktree`、`session.directory`、`message.path.cwd`） | 有（`cost`，客户端自算）              |
+
+三个客户端都记录了**输入、输出、缓存读取**；**缓存写入**只有 Codex 与 Claude Code 有字段（OpenCode 本机数据全为 0）。
+`请求级明细`都能拿到，但**去重口径差异很大**（见第 5 节），这是后续实现中最关键的一处风险。
+
+## 2. Codex
+
+### 2.1 数据路径
+
+| 路径                                                                                    | 作用                | 说明                                                                                                                             |
+| --------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `%USERPROFILE%\.codex\sessions\<年>\<月>\<日>\rollout-<ISO时间>-<thread_id>.jsonl`      | 主会话流水          | 353 个文件，988.5 MB，单文件最大 67.7 MB，最小 23.6 KB                                                                           |
+| `%USERPROFILE%\.codex\sessions\...\rollout-<时间>-<thread_id>_<parent_thread_id>.jsonl` | 续接会话流水        | 文件名含两个 id；`session_meta.history_base.thread_id` 指向父线程                                                                |
+| `%USERPROFILE%\.codex\archived_sessions\**\rollout-*.jsonl`                             | 归档会话            | 24 个文件，格式与 sessions 相同                                                                                                  |
+| `%USERPROFILE%\.codex\state_5.sqlite`                                                   | 线程索引/聚合       | 表 `threads`（356 行），含 `tokens_used`、`model`、`cwd`、`git_branch`、`archived`、`cli_version`                                |
+| `%USERPROFILE%\.codex\thread_history_1.sqlite`                                          | 投影（turn 时间线） | 表 `thread_turns`（1409 行，含 `started_at`/`completed_at`/`duration_ms`）、`thread_items`（38 399 行，含正文 JSON，**不使用**） |
+| `%USERPROFILE%\.codex\session_index.jsonl`                                              | 轻量索引            | 仅 `{id, thread_name, updated_at}`，无 token 字段（`thread_name` 属正文，不使用）                                                |
+| `%USERPROFILE%\.codex\logs_2.sqlite`                                                    | 运行日志            | `logs.feedback_log_body` 含自由文本，**不使用**                                                                                  |
+| `%USERPROFILE%\.codex\history.jsonl`                                                    | 提示词历史          | `{session_id, ts, text}`，`text` 是提示词正文，**不使用**                                                                        |
+
+### 2.2 证据（实测数字）
+
+- 377 个 rollout 文件、19 379 条 `token_usage_record`、32 787 条 `event_msg.token_count`，解析错误 0。
+- 行类型分布：`response_item` 107 513、`event_msg` 89 870、`token_usage_record` 19 360、`turn_context` 2 518、
+  `world_state` 1 138、`session_meta` 413、`compacted` 119、`retained_context` 16。
+- `threads` 表：356 行（327 未归档 / 29 已归档），`tokens_used` 合计 5 330 876 848，29 行 `tokens_used = 0`。
+- 字段覆盖：
+  easoning_output_tokens 与 cache_write_input_tokens 在 19 360/19 360 条记录中存在。
+- token 合计（261 个含新格式的文件）：input 3 453 701 489、output 15 125 645、cached_input 3 338 992 199、cache_write 676 664、
+  easoning_output 5 847 260、 otal 3 468 827 134；仅含旧格式的文件需另走 legacy 路径，故以上为下限。
+- 累计单调性：`thread_token_usage.total_tokens` 在同一文件内**无下降**（0 处违例），可用于取"线程最终值"。
+- 口径校验：19 379 条记录中 `input_tokens + output_tokens == total_tokens` **全部成立**；
+  `cached_input_tokens <= input_tokens`、`reasoning_output_tokens <= output_tokens` 全部成立。
+
+### 2.3 记录结构（`token_usage_record`，0.153.0+）
+
+```text
+{ "timestamp": ISO8601, "ordinal": n, "type": "token_usage_record",
+  "payload": { "thread_id", "turn_id", "session_id", "root_turn_id", "response_id",
+    "usage":               { input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens },
+    "turn_token_usage":    { 同上 6 个字段 },
+    "thread_token_usage":  { 同上 6 个字段 } } }
+```
+
+旧格式（0.151.x 及更早，本机 80 个文件仅此路径）：
+
+```text
+{ "type": "event_msg",
+  "payload": { "type": "token_count",
+    "info": { "last_token_usage": {6 个字段}, "total_token_usage": {6 个字段}, "model_context_window": n } } }
+```
+
+`session_meta` 提供 `session_id`、`id`(=thread_id)、`timestamp`、`cwd`、`cli_version`、`originator`、`source`、
+`base_instructions.provenance.model`、`git.{branch, commit_hash, repository_url}`；
+`turn_context` 提供逐轮 `model`、`effort`、`cwd`、`workspace_roots`、`current_date`、`timezone`。
+
+### 2.4 字段映射
+
+| 目标字段   | 来源                                                                   | 等级     | 备注                                                                                   |
+| ---------- | ---------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------- |
+| 会话 ID    | `payload.thread_id`（= `session_meta.id`）/ `payload.session_id`       | measured | 二者不同：356 线程 vs 192 个 `session_id`，**thread 粒度更细**；续接会产生新 thread_id |
+| 时间       | 行级 `timestamp`、`state_5.threads.created_at_ms/updated_at_ms`        | measured | JSONL 为 ISO8601（UTC，`Z`）；SQLite 为毫秒时间戳                                      |
+| 模型       | `turn_context.model`、`threads.model`                                  | measured | 记录的是本次运行实际使用的模型                                                         |
+| 项目       | `turn_context.cwd`、`threads.cwd`、`payload.git.branch/repository_url` | measured | cwd 可直接映射到项目；`projects` 表另有 12 条项目记录                                  |
+| 输入 token | `usage.input_tokens`（累计：`thread_token_usage.input_tokens`）        | measured | **已包含** `cached_input_tokens`（子集，不可相加）                                     |
+| 输出 token | `usage.output_tokens`                                                  | measured | **已包含** `reasoning_output_tokens`（子集，不可相加）                                 |
+| 缓存读取   | `usage.cached_input_tokens`                                            | measured | 命中缓存的输入部分                                                                     |
+| 缓存写入   | `usage.cache_write_input_tokens`                                       | measured | 本机 19 385 条中 119 条非 0（合计 676 664），字段可用但命中很少                        |
+| 推理 token | `usage.reasoning_output_tokens`                                        | measured | 输出子集，可单独展示                                                                   |
+| 成本       | ——                                                                     | 不可得   | 客户端不记录价格；需 TokenView 内置价格表推导                                            |
+
+### 2.5 限制与风险
+
+1. **格式分界**：`token_usage_record` 自 `cli_version 0.153.0` 起出现；0.151.x 及更早只有 `event_msg.token_count`。
+   本机 353 个文件（`sessions`）中：27 个只有新格式、74 个只有旧格式、252 个两者都有。解析必须双路径。
+2. **两套记录同时存在时的关系（2026-10-11 补充实测，重要）**：同一文件里两套记录并非总是镜像关系。
+   - 新格式窗口内的每条请求，旧格式会写一条数值相同的镜像事件；这些镜像必须丢弃，否则同一请求会被计两次。
+   - 新格式开始之前的历史在混合文件里**只以旧格式存在**（本机 81 个混合文件出现了这种前缀），必须保留为明细。
+   - 两个累计计数器起点不同：`thread_token_usage.total_tokens` 可能只覆盖新格式窗口（实测某线程仅 2,545,710），
+     而 `total_token_usage` 覆盖整条旧格式链（同线程 34,754,480）。**线程总量必须取两者的最大值**，
+     既不能相加，也不能固定偏向新格式。按最大值的口径与 Codex 自身 `state_5.sqlite` 的 `threads.tokens_used`
+     对账：309 个有数据的线程中 307 个完全一致，剩余差值合计 331,155（0.006%）。
+3. **续接会话**：8 个文件的 `history_base.thread_id != payload.id`，其 `thread_token_usage` 含继承的父线程累计值；
+   本机这 8 个父线程都不在 `threads` 表中（未发现重复计数），但**一旦父线程仍存在同表，按行相加会重复计数**。
+   必须按 thread_id 取"最终累计值"，禁止把多文件相加。
+4. **`tokens_used` 存在滞后**：当前活跃线程 SQLite 值 4 799 144 vs JSONL 最终累计 4 941 884（差 142 740）；
+   其余 7 个已完成线程两者完全一致。结论：SQLite 适合快速列表/筛选，精确值以 JSONL 累计计数器（见上一条）为准。
+5. **体量大**：1 GB JSONL 全量解析约 8~10 秒（本机 Node 流式）；UI 首次扫描需异步 + 缓存。
+6. **同目录存在敏感内容**：`thread_history_1.sqlite`、`logs_2.sqlite`、`history.jsonl`、`session_index.jsonl(thread_name)`
+   含正文/提示词，采集实现必须严格限定到上述字段白名单。
+7. **SQLite 为活跃 WAL 库**：必须以只读方式打开；`threads` 表另有 `title`/`preview`/`first_user_message` 等正文字段，禁止读取。
+
+## 3. Claude Code
+
+### 3.1 数据路径
+
+| 路径                                                                            | 作用         | 说明                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `%USERPROFILE%\.claude\projects\<cwd 变形>\<sessionId>.jsonl`                   | 主会话转录   | 目录名是 cwd 的字符替换形式（如 `D--Repos-RuoYi-Vue`），不保证可逆；每行带 `cwd`，应以行内 `cwd` 为准                                                                                                                                                                                               |
+| `%USERPROFILE%\.claude\projects\<cwd 变形>\<sessionId>\subagents\agent-*.jsonl` | 子代理转录   | 每个 Task 子代理一个文件，`isSidechain=true`；与主文件**无 message.id 重叠**                                                                                                                                                                                                                        |
+| `%USERPROFILE%\.claude\projects\...\subagents\agent-*.meta.json`                | 子代理元数据 | 小文件（约 140 B）                                                                                                                                                                                                                                                                                  |
+| `%USERPROFILE%\.claude.json`                                                    | 全局状态     | 含每个项目的 `lastTotalInputTokens`、`lastTotalOutputTokens`、`lastTotalCacheReadInputTokens`、`lastTotalCacheCreationInputTokens`、`lastCost`、`lastSessionId`、`lastModelUsage`（**仅最后一次会话**）；同文件含 `userID`、`machineID`、`mcpServers`，部分项目条目含提示词历史，**必须白名单读取** |
+| `%USERPROFILE%\.claude\history.jsonl`                                           | 提示词历史   | `{display, pastedContents, timestamp, project, sessionId}`，`display`/`pastedContents` 属正文，**不使用**                                                                                                                                                                                           |
+| `%USERPROFILE%\.claude\settings.json`                                           | 配置         | 仅 `env` 键，可能含凭据，**不读取值**                                                                                                                                                                                                                                                               |
+| `%USERPROFILE%\.claude\{debug,backups,file-history,jobs,teams,plugins}`         | 辅助数据     | 与用量统计无关                                                                                                                                                                                                                                                                                      |
+| `%USERPROFILE%\.claude\cache\`                                                  | 无用量缓存   | 仅有 `changelog.md` 等，无 `stats-cache.json`                                                                                                                                                                                                                                                       |
+
+### 3.2 证据（实测数字）
+
+- 72 个 `.jsonl`（14 个主目录 + 子代理目录），39 个唯一 `sessionId`；解析错误 0。
+- `assistant` 行 4 956 条且**全部**含 `message.usage`；`user` 行 2 645 条；`isSidechain` 真 1 172 / 假 3 784（与文件位置一致：主文件全为 false，子代理文件全为 true）。
+- **重复写入**：同一 `(sessionId, message.id)` 最多出现 15 次；本机 1 735 个唯一消息对应 4 956 行，即 1 531 个键被重复写入。
+  抽样 218 个重复键，`(input, output, cache_read)` 值在重复之间**完全一致**（说明是重复落盘，而非流式增量）。
+- 去重后合计：`input 32 817 400`、`output 1 172 759`、`cache_read 189 724 162`、`cache_creation 626 365`；
+  其中主转录 `input 30 475 975 / output 899 067 / cache_read 176 526 850 / cache_creation 626 365`，
+  子代理 `input 2 341 425 / output 273 692 / cache_read 13 197 312 / cache_creation 0`。
+- 版本跨度 `2.1.161 .. 2.1.294`；模型值含 `deepseek-v4-flash`、`claude-sonnet-5`、`claude-opus-5`、`<synthetic>` 等（代理/自定义模型名）。
+- `usage.cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` 在 136 行非 0；`usage.iterations` 仅 3 行非空。
+
+### 3.3 记录结构（`type = "assistant"`）
+
+```text
+{ "type": "assistant", "uuid", "parentUuid", "sessionId", "timestamp", "cwd", "gitBranch",
+  "version", "userType", "isSidechain", "message": {
+      "id", "model", "stop_reason", "type",
+      "usage": { "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                 "service_tier", "speed", "inference_geo",
+                 "cache_creation": { "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens" },
+                 "server_tool_use": { "web_fetch_requests", "web_search_requests" },
+                 "iterations": [ ... ] } } }
+```
+
+其他行类型：`user`（2 645 行）、`system`、`queue-operation`、`attachment`、`ai-title`、`custom-title`、`last-prompt`、`mode`。
+这些行不含 token 用量，但 `mode`/`system`/`attachment` 可用于辅助时间线。
+
+### 3.4 字段映射
+
+| 目标字段   | 来源                                                                               | 等级                                               | 备注                                                   |
+| ---------- | ---------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------ |
+| 会话 ID    | `sessionId`（行级）                                                                | measured                                           | 主文件与子代理文件共享同一 `sessionId`                 |
+| 请求标识   | `message.id`                                                                       | measured                                           | 去重主键（配合 `sessionId`）                           |
+| 时间       | `timestamp`（ISO8601，UTC `Z`）                                                    | measured                                           | 每条 assistant 记录一个时间点                          |
+| 模型       | `message.model`                                                                    | measured                                           | 含代理模型名与 `<synthetic>`（合成消息，需过滤或标记） |
+| 项目       | `cwd`（推荐）、`gitBranch`；目录名为辅助                                           | measured                                           | 目录名不可靠可逆，行内 `cwd` 才是准值                  |
+| 输入 token | `message.usage.input_tokens`                                                       | measured                                           | 与缓存读取/写入**不重叠**（Anthropic 语义）            |
+| 输出 token | `message.usage.output_tokens`                                                      | measured                                           | 与 input 不重叠                                        |
+| 缓存读取   | `message.usage.cache_read_input_tokens`                                            | measured                                           | 独立字段                                               |
+| 缓存写入   | `message.usage.cache_creation_input_tokens`（细分见 `cache_creation.ephemeral_*`） | measured                                           | 本机 5m/1h 细分仅 136 行非 0                           |
+| 子代理用量 | 同字段，来自 `subagents/agent-*.jsonl`                                             | measured                                           | 需与主转录合并统计，但注意按会话区分                   |
+| 成本       | ——                                                                                 | 不可得（除 `.claude.json` 的 `lastCost` 单会话值） | 需价格表推导                                           |
+
+### 3.5 限制与风险
+
+1. **重复写入必须去重**：不去重会把本机总量高估约 2.9 倍（4 956 行 → 1 735 条唯一消息）。
+2. **无会话级聚合表**：`session`/`sessionId` 级指标需自行聚合；`.claude.json` 只有"最后一次会话"的快照，不能当历史。
+3. **子代理用量在独立文件**：只读主转录会漏掉约 7% 的输入与 23% 的输出（本机比例）。
+4. **正文无处不在**：`user`/`assistant` 行的 `message.content`、`history.jsonl`、部分项目配置都含正文，必须字段白名单化。
+5. **可能存在自动清理**：`%USERPROFILE%\.claude\.last-cleanup` 记录了 `2026-10-08T15:01:59Z` 的清理动作，
+   本机最早会话为 2026-06-05。**历史深度是否受保留策略限制尚未确认**（需继续观察或查文档）。
+6. **无成本字段**，且存在代理/自定义模型名（`deepseek-v4-flash` 等），价格表若只覆盖官方模型会大面积"未定价"。
+
+## 4. OpenCode
+
+### 4.1 数据路径
+
+| 路径                                                                  | 作用                        | 说明                                                                        |
+| --------------------------------------------------------------------- | --------------------------- | --------------------------------------------------------------------------- |
+| `%USERPROFILE%\.local\share\opencode\opencode.db`                     | **主数据库**（SQLite，WAL） | 1 186 MB；`journal_mode=wal`；最后写入 2026-10-11                           |
+| `%USERPROFILE%\.local\share\opencode\storage\session_diff\ses_*.json` | 会话 diff 占位              | 均为 2 B 空对象；旧 JSON 存储已迁移到 SQLite（`kv` 中有 `migration.v1-v2`） |
+| `%USERPROFILE%\.local\share\opencode\log\*.log`                       | 运行日志（10.5 MB）         | 非统计必需                                                                  |
+| `%USERPROFILE%\.local\share\opencode\snapshot\`                       | 文件快照（431 个文件）      | 与 token 统计无关                                                           |
+| `%USERPROFILE%\.config\opencode\`                                     | 配置与插件                  | `auth.json` 等含凭据，**不读取**                                            |
+
+数据库表（只读列出）：
+
+| 表                                           | 行数         | 用途                                                                                                                                                                                                    |
+| -------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session` / `session_v2`                     | 49 / 48      | 会话聚合：`tokens_input/output/reasoning/cache_read/cache_write`、`cost`、`model`、`version`、`parent_id`、`directory`、`time_created/updated/archived`                                                 |
+| `message`                                    | 5 776        | 逐条消息 JSON（`data`）：`tokens.{input,output,reasoning,cache.read,cache.write,total}`、`cost`、`modelID`、`providerID`、`variant`、`mode`、`agent`、`time.created/completed`、`path.cwd/root`、`role` |
+| `part`                                       | 23 141       | 内容片段（text/tool/step-start/step-finish/...），**不使用**                                                                                                                                            |
+| `project` / `project_directory` / `worktree` | 21 / 18 / 17 | 项目维度：`worktree`、`vcs`、`time_active`                                                                                                                                                              |
+| `session_message`                            | 5 807        | 会话事件流：`type`(assistant/user/system/compaction/synthetic/idle) + 自增 `seq`                                                                                                                        |
+| `event` / `event_sequence`                   | 348 / 50     | 事件溯源（仅 2 个聚合），不可作为水位                                                                                                                                                                   |
+| `credential` / `account` / `account_state`   | 3 / 0 / 0    | 凭据，**禁止读取**                                                                                                                                                                                      |
+
+### 4.2 证据（实测数字）
+
+- `session` 合计：`input 16 997 781`、`output 1 468 457`、`reasoning 1 006 064`、`cache_read 1 284 944 667`、`cache_write 0`、`cost 4.93`；
+  `session_v2` 为 `16 697 113 / 1 455 035 / 1 006 083 / 1 284 178 075 / 0 / 4.93`。两表 47 行重叠且 token 值**完全一致**（0 行不一致）。
+- 一致性：抽 8 个会话，`session.tokens_input/output/cache_read` 与 `message` 表按会话求和**逐字段完全相等**；
+  说明会话列是消息的物化聚合，二者不可相加。
+- 口径校验：5 232 条消息含 `tokens.total`，`total == input + output + reasoning + cache.read` **全部成立**（0 处不一致）。
+- 抽样 4 000 条消息：`message.data.tokens.cache.write` 全为 0；`cost` 仅 3 798 条 assistant 消息有值（0 ~ 0.0916）。
+- `parent_id` 非空的会话 20/49（子代理/嵌套会话）；已归档 1 个。
+- 版本列出现 `1.18.16 .. 1.18.34` 与 `2.0.22`；模型列是 JSON 字符串（`{"id","providerID","variant"}`），
+  消息里旧格式为扁平 `modelID`/`providerID`，新格式为嵌套 `model.modelID`（本机 202 条）。
+
+### 4.3 字段映射
+
+| 目标字段   | 来源                                                                       | 等级                  | 备注                                        |
+| ---------- | -------------------------------------------------------------------------- | --------------------- | ------------------------------------------- |
+| 会话 ID    | `session.id`（`ses_*`），父会话 `parent_id`                                | measured              | 子会话需标记，避免与父会话混淆              |
+| 消息 ID    | `message.id`                                                               | measured              | 请求级主键                                  |
+| 时间       | `session.time_created/updated`、`message.data.time.created/completed`      | measured              | 毫秒时间戳；有真实耗时（可推导时长）        |
+| 模型       | `session.model`（JSON）、`message.data.modelID` + `providerID` + `variant` | measured              | 需解析 JSON，兼容扁平/嵌套两种写法          |
+| 项目       | `session.directory`、`project.worktree`、`message.data.path.cwd/root`      | measured              | `project` 表另有 `vcs`、`time_active`       |
+| 输入 token | `session.tokens_input` / `message.data.tokens.input`                       | measured              | 与缓存读取不重叠（见 total 公式）           |
+| 输出 token | `session.tokens_output` / `message.data.tokens.output`                     | measured              |                                             |
+| 推理 token | `session.tokens_reasoning` / `message.data.tokens.reasoning`               | measured              | 独立字段，非 `output` 子集                  |
+| 缓存读取   | `session.tokens_cache_read` / `message.data.tokens.cache.read`             | measured              | 本机占比最大（1.28 B）                      |
+| 缓存写入   | `session.tokens_cache_write` / `message.data.tokens.cache.write`           | measured              | 本机全 0，需按客户端/供应商确认             |
+| 成本       | `session.cost` / `message.data.cost`                                       | derived（客户端自算） | 客户端按 provider 价位计算，币种/精度需确认 |
+
+### 4.4 限制与风险
+
+1. **双表并存**：`session` 与 `session_v2` 在迁移期同时存在且内容基本一致，**绝对不能相加**；
+   应"按 id 合并，优先 `session_v2`，缺失则回落到 `session`"（本机各有 1~2 行独有）。
+2. **SQLite 活跃写入**：WAL 模式、应用运行时会持续写入；必须以只读打开，必要时先复制快照（需用户显式同意）再解析。
+3. **`data` 是大 JSON**：`message.data`、`part.data`、`session_message.data` 内含正文，必须只取白名单字段。
+4. **旧版 JSON 存储已迁移**：本机没有历史 JSON 存储可读；若目标机器是旧版本 OpenCode，需要额外适配 `storage/session|message|part` 目录结构（本机无样本，**未验证**）。
+5. **`event` 表覆盖不全**（仅 2 个聚合），不能作为增量水位；应使用 `session.time_updated` 与 `message.time_updated`。
+
+## 5. 字段可得性总结（三客户端对照）
+
+| 能力             | Codex                                                     | Claude Code                                          | OpenCode                             |
+| ---------------- | --------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------ |
+| 请求级输入 token | 实测（`usage.input_tokens`，含缓存）                      | 实测（`usage.input_tokens`，不含缓存）               | 实测（`tokens.input`）               |
+| 请求级输出 token | 实测（`usage.output_tokens`，含推理）                     | 实测（`usage.output_tokens`）                        | 实测（`tokens.output`，推理单列）    |
+| 请求级缓存读取   | 实测（`cached_input_tokens`，**是 input 子集**）          | 实测（`cache_read_input_tokens`，独立）              | 实测（`cache.read`，独立）           |
+| 请求级缓存写入   | 实测（`cache_write_input_tokens`，本机仅 119 条非 0）     | 实测（`cache_creation_input_tokens`，含 5m/1h 细分） | 实测（`cache.write`，本机 0）        |
+| 会话级累计       | 实测（`thread_token_usage` 累计 + `threads.tokens_used`） | 需自行聚合                                           | 实测（`session.tokens_*`）           |
+| 模型             | 实测（含 effort）                                         | 实测                                                 | 实测（含 provider/variant）          |
+| 项目             | 实测（cwd + git 信息）                                    | 实测（cwd + gitBranch）                              | 实测（directory + project.worktree） |
+| 成本             | **不可得**                                                | **不可得**（仅 `.claude.json` 单会话 `lastCost`）    | 实测（客户端自算，币种待确认）       |
+| 请求耗时         | 可推导（`turn_context` + 事件时序）                       | 可推导（相邻 timestamp 差）                          | 实测（`time.created/completed`）     |
+| 消息正文         | 有（**不采集**）                                          | 有（**不采集**）                                     | 有（**不采集**）                     |
+
+可靠推导 vs 不可得：
+
+- **可靠推导**：会话时长（`thread_turns.duration_ms` / `time.created~completed` / 相邻事件间隔）；成本（价格表 × token，须标注为 `derived`，且必须能提示"未定价模型"）；缓存命中率（`cache_read ÷ (input + cache_read)`，仅在口径澄清后）。
+- **不可得**：客户端计费的真实现金金额（除 OpenCode 自算值）；超出本地记录范围的请求（含被客户端清理的历史）；被代理/中转改写后的真实供应商用量。
+
+## 6. 历史导入、增量同步、去重、升级兼容评估
+
+### 6.1 历史导入
+
+- 一次性全量扫描：Codex 约 1 GB JSONL（本机 8~10 s 流式解析）——建议**优先走 `state_5.sqlite.threads` 快速填充列表**，
+  再按需对单线程解析 JSONL 取精确值；Claude Code 31 MB（亚秒级，直接全量）；OpenCode 直接查询 SQLite 聚合列（最快）。
+- 导入必须幂等：以唯一键 upsert，重复执行不产生新记录。
+- 导入上限应可见：UI 需要展示"扫描到的客户端/会话/未解析记录数"，而不是静默丢弃。
+
+### 6.2 增量同步
+
+| 客户端      | 增量依据                                                        | 说明                                                                                                                            |
+| ----------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Codex       | 文件 `mtime + size`，文件内按 `ordinal` / 字节偏移续读          | rollout 为 append-only；`thread_history_1.thread_history_projection_state` 里 `next_rollout_byte_offset` 证明客户端也采用该策略 |
+| Claude Code | 文件 `mtime + size`，按行续读；`(sessionId, message.id)` upsert | 同一 message 会被重复写入，不能只按行号追加                                                                                     |
+| OpenCode    | `session.time_updated` / `message.time_updated`（毫秒）         | SQLite 可直接增量查询；表 `event` 不完整，不要依赖                                                                              |
+
+### 6.3 去重（最关键）
+
+| 客户端      | 唯一键                              | 取值规则                                                             | 反例（会造成重复计数）                                              |
+| ----------- | ----------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Codex       | `thread_id`（+ `response_id` 明细） | 每线程取"最终累计 `thread_token_usage`"；请求级按 `response_id` 去重 | 多文件相加；把 `total_token_usage` 与 `token_usage_record` 同时累加 |
+| Claude Code | `(sessionId, message.id)`           | 重复出现时保留任意一条（值一致）                                     | 按行累加（本机高估 ~2.9 倍）                                        |
+| OpenCode    | `message.id`                        | 以 `message` 明细为事实源，`session.tokens_*` 作为聚合缓存           | `session` + `session_v2` 相加；session 列与 message 求和相加        |
+
+### 6.4 升级兼容
+
+- **Codex**：`token_usage_record`（≥0.153.0）与 `event_msg.token_count`（≤0.151.x）双路径解析；两者字段名相同，可复用同一映射；
+  需容忍新行类型（`world_state`、`retained_context`、`compacted`）与新增字段。
+- **Claude Code**：23 个版本共存的字段稳定（`message.usage.*` 一直在）；新增 `cache_creation.ephemeral_*`、`iterations[]`、
+  `<synthetic>` 模型值，应按"未知字段忽略、未知模型标记"处理。
+- **OpenCode**：`session` → `session_v2` 迁移 + 模型字段扁平→嵌套，需要"并表 + 双写法解析"；
+  表结构由 `migration` 表（48 条迁移记录）驱动，读取方应做列存在性检测（`PRAGMA table_info`）而不是硬编码。
+- 通用建议：解析层只依赖白名单字段，字段缺失按"缺失"处理并在 UI 显示"未解析/未识别"计数。
+
+## 7. 无法确认 / 待验证事项
+
+1. Codex `threads.tokens_used` 对**活跃线程**存在滞后（本机差 142 740），需确认是写入节流还是口径差异；
+   若要用 SQLite 出精确值，必须做一次"活跃线程回落到 JSONL"的处理。
+2. Codex 续接会话（`history_base`）在"父线程仍存在"的场景是否会重复计数——本机 8 例父线程均已不在 `threads` 表中，无法证伪。
+3. Claude Code 的历史保留策略：`.last-cleanup` 存在，但**清理周期与是否删除转录文件未确认**（无法从本机数据判定）。
+4. Claude Code `usage.iterations` 语义（仅 3 条非空）未确认，暂不纳入口径。
+5. OpenCode `cost` 的币种与定价来源未确认（`providerID` 含自建中转，如 `kuncode`、`chain888`、`opencode-go`）。
+6. OpenCode 旧版本（JSON `storage/` 结构）的样本在本机不存在，兼容方案未经验证。
+7. 三个客户端在本机都通过**第三方中转/代理**使用自定义模型名（`deepseek-flash`、`mimo-v2.5-pro` 等），
+   官方价格表无法覆盖；成本口径与价格表来源必须由项目显式决策（见 `docs/data-metrics.md` E3）。
+8. 以上结论均为本机单机实测（3 个客户端的当前版本），**未与官方文档交叉验证**，也未覆盖 macOS/Linux 的路径差异。
+
+## 8. 建议的下一步（仍不写采集代码）
+
+1. 先定义归一化映射与去重键（对应 `docs/architecture.md` 第 4 节），并把本文第 6.3 节的唯一键写入 `docs/data-metrics.md`。
+2. 决策读取策略：Codex "SQLite 快路径 + JSONL 精确值"、Claude Code "JSONL 全量去重"、OpenCode "SQLite 直查"。
+3. 定义 fixture 规范：从上述结构派生**手工构造**的去敏样本（禁止复制真实会话），覆盖旧/新格式、续接会话、重复写入、缺失字段。
+4. 决策成本口径：价格表来源、自定义/中转模型的"未定价"表现、币种与精度（`docs/data-metrics.md` 第 5、7 节）。
+5. 明确隐私边界：实现时只允许读取本文列出的白名单字段，禁止读取 `thread_items`、`part`、`message.content`、`history.jsonl`、`*.json` 凭据。
+
+## 9. DSH 补充调研（2026-10-11）
+
+用户确认 DSH 指 deepseek-hermes。本机 `~/.dsh/sessions` 存在 8 份 `session.jsonl.zstd` 与 4 份 `session.v4.jsonl.zstd`；版本化文件是正式迁移后日志，先前误认为备份导致漏采。
+核对本机 deepseek-harness 源码：`session-persistence-jsonl/src/format.ts` 定义 header / 文件布局，
+`zstd.ts` 定义串联 checksummed Zstandard 帧；`core/session/src/types.ts` 定义 v0 / seq / time / seedLength；
+`llm-deepseek/src/translate.ts` 表明 inputTokens 已扣除缓存命中、outputTokens 为 completion_tokens（含 reasoning）。
+按客户端 token-meter 规则对 assistant/chunk 的早期 usage 与 assistant/message 的最终 usage 按 turn / step 替换；不统计打包文本 / 推理 chunk、标题 / 搜索插件的额外 LLM 调用。
+该范围与已持久化核心请求日志一致，不能宣称覆盖 DSH 所有插件调用。token-meter 的客户端无关投影契约与 pi-ai 适配器也已核对；SQLite 后端未验证，未知持久化格式拒绝提交。
+检查只输出字段形态与聚合数值，不输出会话正文、标题、系统提示词或凭据；未修改任何源文件。
+旧版三客户端对账数字及缺失情况见 `data-model.md` 第 10 节。
+
+再次核对已安装 DSH 源码（`D:/Apps/IDEs/DSH/deepseek-harness`）：`core/session/src/types.ts` 当前格式版本为 4；
+`session-persistence-jsonl/src/format.ts` 定义 v0 无版本前缀、v1 起使用 `session.vN`，不应忽略较新代。
+v0-to-v1 codec 保留 seedLength；v1-to-v2 codec 改为 isSeeded 与 inherited end-seed，v2-to-v3 / v3-to-v4 保持此物理边界。
+`llm/token-meter/src/usage-projection.ts` 确认 v2–v4 内嵌 stream usage / assistant/attempt、最终 usage 优先与 retry-started 独立尝试。
+用户确认公司电脑未统计文件为 `session.v4.jsonl.zstd`；仅确认格式，尚未访问其公司数据或对账会话数。
+
+## Kimi Code — 本机数据与客户端契约（2026-10-11）
+
+只读检查用户指定 `.kimi-code`：2 份会话 state 与 2 份 agent wire（协议 1.4 / 1.5）。
+另有插件 state，仅含 enabled，不属于会话，按目录形状排除。
+现代 state version 2 含 id / cwd / 毫秒时间；旧版无 id，workDir / ISO UTC 时间，
+客户端迁移逻辑回退到完整 session_* 目录名。根目录由客户端 `KIMI_CODE_HOME` 配置覆盖。
+
+证据来自已安装 kimi.exe 内嵌 JavaScript 的 provider adapter、addUsage、usageTotal、record 与 migration 代码，
+只检索字段/函数契约，未运行客户端命令、未输出正文或凭据。
+OpenAI adapter 的 inputOther = promptTokens - cached；Anthropic adapter 的 inputOther 与缓存字段独立。
+usageTotal = inputOther + output + inputCacheRead + inputCacheCreation；record 默认 session scope，
+turn scope 也计入会话累计，故 `usage.record` 是增量而非累计；相同 usage 值不可内容去重。
+`token_counting.measured` / `turn_recorded` 是上下文长度，服务端镜像不重复扫描。
+
+独立只读脚本与内存库导入对账：2 会话、2 usage、普通输入 31,422、输出 925、缓存读取 28,800、
+缓存写入 0、规范总量 61,147；另一个会话无 usage，保留未知。没有未识别行。
+这些是本次采样结果，不是固定 fixture；自动测试仅使用合成数据。
+
+## MiMoCode — SQLite 与去重（2026-10-11）
+
+本机用户指定 ~/.local/share/mimocode/mimocode.db 包含 session / message / part；
+只读 schema 和 SQL JSON 投影确认 message.data.tokens 独立字段：input、output、reasoning、cache.read、cache.write、可选 total。
+635 个 assistant 中 613 条有 total，全部满足 total = 五个桶之和；cache.read > input 出现 583 次，reasoning > output 出现 60 次。
+已安装 Xiaomi MiMo app.asar/out/main/node.mjs 的 getUsage 函数确认 input 预先扣除缓存，output 预先扣除 reasoning；cache.write 独立计入。
+MIMOCODE_DB 的绝对/相对覆盖与 XDG data 根同样由该模块确认。这里只检索安装源码中的字段契约，不执行客户端、不输出正文或凭据。
+
+导入标记 claude_import 中 3 个会话的 message_ids 对应 17 个 assistant 副本；external_import 为空。
+仅排除登记的导入消息，不因会话曾导入而丢弃其后续本地请求；纯导入会话不计入 MiMo。
+独立只读 SQL 与采集器对账：14 个本地会话、618 个请求、input 3,581,156、output 198,576、
+reasoning 25,596、cache.read 65,200,832、cache.write 0，总量 69,006,160。全库（含导入）会得到 70,582,900，差值来自外部副本。
+MiMo cost 是 getUsage 按价格表计算，当前不作为客户端实测费用导入。
+
+## Pi Desktop — schema 1 与物理操作账本（2026-10-11）
+
+用户指定 ~/.pi-desktop/sessions 有一份 schema 1 JSONL：session header、message 行，统计来自 assistant.meta.usage。
+本机 16 个 assistant operation，input 26,490、output（含推理）7,062、reasoning 1,843、cacheRead 320,896、cacheWrite 未提供。
+全部满足 total = input + output + cacheRead + cacheWrite，总量 354,448；归一化普通 output 为 5,219，不重复加 reasoning。
+一条未含 cacheRead，schema 中可选缓存字段按 native ledger 默认 0；不读取 blocks、system meta 中的 messageJson。
+
+源码依据：[vastsa/PI-Desktop](https://github.com/vastsa/PI-Desktop/tree/f24984d69667243c4e763b7009e07015be6677d1)，
+核对 packages/agent-runtime/src/agent-messages.ts（usageFromPi / usageToPi）、request-usage.ts、
+packages/shared/src/message-usage.ts（addUsage）和 crates/host-core/src/sessions/usage.rs。
+operationId 是物理请求，operations 是原子账本，父 aggregate 不得与子请求再相加；完整总量优先，legacy 未归属残差仍可加。
+usageOrigin 当前约定 pi / legacy；costStatus 明确 reported / estimated / unknown，本机全部为 estimated，当前不导入 cost。
+LobeHub XiaomiMiMo 对应小米品牌；其 Pi 标识为 Inflection AI，Pi Desktop 使用本地通用终端图标避免错标。
+这些数字是本机只读时点快照；自动回归使用合成 fixture，无真实会话正文进入仓库。
+
+## WorkBuddy — 5.2.6 输出事件用量（2026-10-12）
+
+只读本机安装的 WorkBuddy 5.2.6 CLI 打包代码与 ~/.workbuddy/projects JSONL 的字段形状、数值；不保存或输出正文、凭据及真实事件 / 会话 ID。WorkBuddy 的 app-instance 将 WORKBUDDY_CONFIG_DIR 同时传给内部 CODEBUDDY_CONFIG_DIR，默认 ~/.workbuddy；TokenView 只尊重 WorkBuddy 自己的配置路径。
+
+客户端 transformItemForSaveAsync 将 providerData.usage 经 normalizeUsageFormat 转成 message.usage；input item processor 只把一次 raw response 的 usage 挂在最后一个输出 item，随后累加到会话。getTotalUsage 遍历携带 usage 的历史项，不按对话轮次 ID 去重。
+
+本机 30 个日志、781 个携带 usage 的原生输出事件：所有 totalTokens == inputTokens + outputTokens；规范 cached_tokens 来自 inputTokensDetails，reasoning_tokens 来自 outputTokensDetails。message.usage 镜像省略为零的缓存字段，故优先读 provider details 中的显式零。10 条记录 reasoning 超出 output，必须标为异常，不能改写原生总量。providerData.messageId 在 7 组事件复用且用量不同，conversationRequestId / traceId 跨多次调用复用；原生 item id 唯一，是本轮请求标识证据。
+
+总原生输入 67,498,728、输出 458,995、客户端总量 67,957,723，message.usage 的缓存读取合计 24,698,540；此处只记录字段研究时的聚合计数，验收对账另记。session_usage.used / size 为上下文占用，不读取为消耗；usage-log.json 为技能 / MCP 活跃记录，不是 Token 账本。rawUsage.prompt_cache_miss_tokens 不是缓存创建计数，credit 非费用币种，均不导入。正文、工具输出、blobs、账号及心跳文件不纳入统计。
+
+验收对账（2026-10-12）：启动应用开启 WorkBuddy 并手动同步，导入 30 个会话 / 30 个文件 / 781 个请求，无法解析为 0。独立只读脚本按原生 (sessionId, id) 核对全部 781 条的时间、客户端总量及缓存 / 推理扣除后的分项，781/781 一致，客户端总量 67,957,723；无正文、真实标识或路径进入提交。采集开关在已有设置中显式开启，其他来源选择保留。
+
+## Copilot CLI（2026-10-12）
+
+本机安装包版本 1.0.91，默认 ~/.copilot；客户端尊重 COPILOT_HOME。session-store.db schema_version=8；sessions 有 3 行，assistant_usage_events 有 0 行。
+只查询 sessions(id,cwd,created_at,updated_at) 和 assistant_usage_events(id,session_id,agent_id,parent_tool_call_id,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,created_at)。不读取 summary、turns 正文、配置、账户、token_details_json、FTS 内容或工具输出。
+安装包 app.js 的 FJt 原生用量适配将 inputTokensUncached 定义为 inputTokens − cacheReadTokens − cacheWriteTokens；tokenDetails 存在时 input 类为未缓存输入，显示输入为其加两种缓存。reasoning 是输出明细。统计当前依赖用量表规范数字列；混合模型 token_details_json 细粒度计费归属不展开，模型取行级 model，不使用计费模型替代。
+三个 JSONL 会话各有一次 user.message / assistant.turn_start / session.error，没有成功调用用量；shutdown.modelMetrics 为空。currentTokens / systemTokens / conversationTokens / toolDefinitionsTokens 是上下文占用，不能纳入累计用量。JSONL 不与数据库镜像相加。
+本机正数 Token 样本缺失，暂不能做正数实测对账；合成测试覆盖缓存、推理、零、缺失、溢出、负数、跨日、WAL 修正、幂等、旧格式和隐私。
+
+### Copilot Agent Host 本机补充实测（2026-10-12）
+
+已实测确认：CLI 的 `~/.copilot/session-store.db` 与 VS Code `%APPDATA%/Code/agentSessionData/*/session.db` 是两套 SQLite 存储；前者3个会话 / 0条 assistant_usage_events，SDK session-state 中还有一个未登记在前者的 Agent Host 会话。workspace client_name=vscode-agent-host；不能靠 producer=copilot-agent 区分 CLI 与 Host。
+后者通过 session_metadata.defaultChatProviderData.sdkSessionId 关联 SDK ID；外层会话 ID 不同。3个 turns.event_id 全部对应 SDK user.message.id，3个 vscode.modelCall.apiCallId 全部对应 assistant.message.data.apiCallId；modelCall.eventId 和 SDK turnId 不能替代关联键。
+已实测确认：SDK 有10个独立模型调用，Host库只持久化3个轮级用量。turnTokenTotals 合计 input314042 / output3372 / cached0；顶层最后调用合计98680 /2353。安装包累加器按模型分别累加 inputTokens/cacheReadTokens/outputTokens，证实顶层并非整轮总量。
+已实测确认：globalStorage/agent-host.db 是会话目录（sessions 与 sessions_v2 为镜像），无用量计数；github.copilot-chat/session-store.db 为旧会话索引；agentSessionData 的 backing / migration 目录不等同独立会话。采集仅选择明确的 SDK 关联与用量，不用目录数量当会话数量。
+推测待验证：非零 cachedTokens 与输入的包含关系、cost 的金额单位、不同客户端版本 / 非默认 Code 目录契约。当前采集不推断这些值；普通 workspace chatSessions 需要独立格式验证，未纳入本次修复。源数据库、事件含正文，解析只使用白名单字段，研究输出及仓库无正文样本。
+
+| 数据源                      | 路径                                                                     | 可获取指标                                                       | 是否含正文          | 本次采集用途                   |
+| --------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------- | ------------------- | ------------------------------ |
+| Copilot CLI 索引 / 用量库   | `%USERPROFILE%/.copilot/session-store.db`（或 COPILOT_HOME）             | session / request / token / model / time；本机用量表为空         | 是，非白名单表 / 列 | 兼容既有 CLI 用量              |
+| SDK 事件                    | `%USERPROFILE%/.copilot/session-state/*/events.jsonl`                    | session / apiCallId / model / ISO time；本机 Host 事件没有 usage | 是                  | 调用身份、模型、时间；跳过正文 |
+| VS Code Agent Host 轮级用量 | `%APPDATA%/Code/agentSessionData/*/session.db`                           | 整轮 token；最后调用 token；SDK 关联                             | 是，草稿 / 编辑等表 | 关联 SDK，整轮与请求分别统计   |
+| Agent Host 会话目录         | `%APPDATA%/Code/User/globalStorage/agent-host.db`                        | provider / session / 毫秒 time；无 token                         | 含标题等私密元数据  | 不作为用量来源                 |
+| 旧 Copilot Chat 索引        | `%APPDATA%/Code/User/globalStorage/github.copilot-chat/session-store.db` | session / turn；本机无新用量表                                   | 是                  | 本次不采集                     |
+| 普通 VS Code Chat 历史      | `%APPDATA%/Code/User/workspaceStorage/*/chatSessions/`                   | 部分 promptTokens / outputTokens 元数据；尚未核定完整口径        | 是                  | 待独立验证，不纳入本次修复     |
+
+落地验证（2026-10-12）：TokenView 本机库已导入4个 Copilot 会话，3个旧会话用量未知；Host 会话整轮317414 Token。10条调用中3条有独立 Token，总和101033，其余7条为 NULL。桌面请求视图同样显示10条调用、101033已知 Token与7条未知，未把轮级聚合重复入请求表。
+
+## Gemini CLI — journal 与字段关系（2026-10-13）
+
+本机安装 @google/gemini-cli 0.63.0；只读安装bundle/chunk-RWBXO4OP.js契约与 ~/.gemini/tmp 项目日志元数据，不执行客户端、不输出正文。Storage.homedir(252011)、getGlobalGeminiDir(253177)说明GEMINI_CLI_HOME替代home后追加.gemini，GEMINI_DIR是常量并非环境配置；项目slug契约位于253037/253111，统计可直接发现tmp目录，无需重造slug。
+日志回放契约：286299的$set.messages为全量替换，pushMessage同id替换整记录；286250–286268的$rewindTo删除目标及后续，目标未找到则清空。$set不能按新请求相加。项目路径来自directories或已核实.project_root，仅存项目元数据。排除antigravity；subagent元数据标旁链，不保存提示词。
+recordMessageTokens(286643–286655)把prompt/candidates/cachedContent/thoughts/toolUse/total原样写input/output/cached/thoughts/tool/total；287027恢复metrics用prompt−cached，证明缓存含于输入。thoughts为独立输出，tool无已验证非零关系，不映射cache_write。
+时点样本：10日志、28最终gemini记录，21次同ID全记录替换、11次$set.messages；input554736/output4196/thoughts15541/cached0/tool0/total574473，22条thoughts大于output。总量与原生total求和一致；非零cached关系来自安装契约，不能声称本机正样本验证。旧.json和sandbox-exec数据根未纳入。
+
+## Grok CLI — 权威用量快照（2026-10-13）
+
+本机版本1.0.50（version.json元数据）；grok.exe内嵌Paths文档明确GROK_HOME覆盖配置根，默认~/.grok。只读sessions/<编码cwd>/<会话>/usage.json、summary.json的身份/cwd/UTC时间，不读chat_history、reasoning密文、events、updates、prompt_context或账号信息。
+安装exe用量展示字符串明确Input tokens包含cached、Output tokens包含reasoning；本机1会话/3轮/9次modelCalls，三个轮级total均等于input+output，且有正缓存/正推理子集。session与turns六计数合计对应：input233668/output3959/cacheRead142848/cacheCreation0/reasoning2202/total237627。规范input90820/output1757，与缓存、推理求和为237627。
+cacheCreation无正样本，headless projector的独立cache creation语义不能直接套usage.json，暂unknown且不计入总量。costUsdTicks未交叉验证，本次不采集、不换算。
+请求表每轮一条、键turnNumber，不把modelCalls展开为9条；会话total采用权威session值不叠加turns。endedAt是轮级记账发生时间，source_ref标timeBasis=turnEndedAt；不称单次调用开始。原生UTC时间含纳秒Z/+00:00，只确定性截断到毫秒。多会话关系未本机验证，覆盖不满足对应条件则partial。
+
+## MCode — runtime-state 请求账本（2026-10-13）
+
+只读已安装MCode app.asar内的代码契约及runtime-state.sqlite白名单；不读取原始raw/record_json、正文、费用或revision文件。dist/main/modules/local-runtime/data-dir.js:150–179、@mavis/config/dist/config.js:359–360确认MINIMAX_DATA_DIR > MAVIS_DATA_DIR > ~/.minimax；数据库为v2/sqlite/runtime-state.sqlite。
+@mavis/local-runtime-v2/dist/infra/db/schema/usage.js:3–17确认id主键、model可NULL、五整数桶且无total列；usage/pi-usage.js:86–105原样写桶，119–121客户端缺失时存0，但TokenView遇NULL/缺列保持未知。@mavis/local-runtime/dist/usage/api.js:72–89明确input/cacheRead/cacheWrite独立及四桶total。
+缓存正样本：主库17请求中16条cache_read>input；全部reasoning/cache_write为0，17模型均NULL。reasoning的非零包含关系未确认，不能把hasUsage的五桶“是否非空”判断冒充total契约；非零/缺失reasoning时output与total未知。
+主库时点统计：1会话/17请求，input61869/output5675/cache_read814226/cache_write0/reasoning0，四桶881770。usage/repo/drizzle.js:132–136的fresh/goal summary total=input+output+reasoning、排除缓存，67544与TokenView差814226是已解释口径差，不是重复计数。
+当时WAL非空，上述仅immutable主库研究值；最终运行对账使用 `Data/Collectors/SqliteSnapshot.cs` 的只读临时副本校验已提交 WAL。SQLite账本无需正文activeRevision/generation，不复制多代历史、不回读正文补NULL模型。源主库/WAL/SHM只读，测试全部合成。
+
+## Devin（Devin Desktop 本地 agent / Devin CLI，2026-10-13）
+
+Devin Desktop 为 Cognition 旗下更名自 Windsurf 的桌面客户端，其 Electron userData 目录为 `%APPDATA%\Devin`（内含 `.devin-migration-complete` 迁移完成标记）。更名前的 `%APPDATA%\Windsurf` 在本机仍残留存在，但无 `cli/sessions.db`。Devin Desktop 内嵌的 Devin Local agent 与 Devin CLI 共享该存储体系（底层同构），核心用量库为 `%APPDATA%\Devin\cli\sessions.db`。
+Unix 对应路径据称遵循 XDG 规范为 `$XDG_DATA_HOME/devin/cli/sessions.db`（默认 `~/.local/share/devin/cli/sessions.db`），但本机 Windows 环境下 `~/.local/share/devin` 不存在，Windows 实际落盘在上述 Electron userData 路径；macOS 与 Linux 路径未实测。
+早期 Cascade 历史数据位于 `~/.codeium/windsurf/cascade/*.pb`（protobuf 格式），在 Devin Desktop v3.9.19 已移除，不作为本次统计数据源。
+2026-10-13 本机实测物理体量：`sessions.db` 为 2,306,793,472 字节（≈2.15 GiB），`sessions.db-wal` 为 145,930,432 字节，`sessions.db-shm` 为 65,536 字节。库内各表行数：`sessions` 355 行、`message_nodes` 108,007 行、`tool_call_state` 24,321 行、`subagent_heads` 18 行、`prompt_history` 3 行、`rendered_commits` 0 行，另有 `app_state` 与 `refinery_schema_history` 表。
+
+### 用量字段与覆盖
+
+全部有效用量均存在于 `message_nodes.chat_message` 的 JSON 路径 `$.metadata` 中。54,595 条 assistant 记录字段覆盖率均为 100%（54,595/54,595）：`request_id`、`generation_model`、`metrics.input_tokens`、`metrics.output_tokens`、`metrics.cache_read_tokens`、`metrics.{ttft_ms,tpot_ms,total_time_ms,tokens_per_sec}`、`metadata.created_at`（RFC3339 纳秒精度 UTC 字符串）、`metadata.finish_reason`（分布为 `tool_calls` 49,525 / `stop` 2,302 / `max_tokens` 717 / `null` 2,051）、`metadata.num_tokens`。
+`metrics.cache_creation_tokens` 在 50,848 行中显式为 JSON `null`，其余 3,747 行中为正整数。
+其余 53,412 行（`108,007 - 54,595`）为 user、system 与 tool 节点，其 `metrics`、`request_id`、`generation_model` 均为 null，不承载用量。
+`metadata.num_tokens` 经核对完全等于 `metrics.output_tokens`，属冗余镜像。
+`message_nodes.metadata` 列（独立 TEXT 列，非 `chat_message` 的 JSON）的键 `num_tokens_preceding` 记录的是请求前的总上下文长度（Context Length），性质等同于 Kimi Code 的 `token_counting.*`，并非单次请求用量消耗，禁止当作 usage 累加。注意它**不在** `chat_message` 的 JSON 里，`json_extract(chat_message, '$.metadata.num_tokens_preceding')` 恒为 NULL。
+`metadata.telemetry` 固定为 `{"source":"assistant","operation":"inference"}`，无旁链信息。
+`metadata.extensions` 存放工具与上下文扩展元数据（`chisel/tool_result_meta`、`chisel/tool_call_content`、`chisel/terminal_output`、`chisel/conversation_history`、`compact/*`、`affogato/cog-context`、`devin-rs/summary` 等），包含敏感与非统计内容，禁止读取。
+`sessions` 主表无任何 token 计数列；`sessions.cogs_json` 仅包含模型与配置项（`model`、`lifetime`、`source`、`context`、`permissions` 等），无用量计数。会话级标识为 `sessions.id`（TEXT），`sessions.working_directory`、`sessions.model`、`sessions.hidden` 可作为项目与主模型元数据。
+
+### Token 语义与证伪
+
+- 输入侧三桶互不重叠且完全线性相加（Anthropic `usage` 语义）。证伪依据：上下文前导长度 `message_nodes.metadata` 列的 `num_tokens_preceding` 在逐行核对中严格等于 `input_tokens + cache_read_tokens + cache_creation_tokens`（抽样 15/15 完全一致；全库 28,080/28,883 达到 97.2% 精确吻合；未吻合的 803 行 `cache_read_tokens` 均为 JSON null，前导长度不可计算）。相竞争的“cache_read 是 input 的子集”假说被证伪：实测存在 `pre = 27,218` 时 `input = 1,293`、`cache_read = 25,925` 的实例，若 cache_read 为 input 子集则前导长度不可能达到 27,218。
+- 显式 JSON `null` 的 `cache_creation_tokens` 行为等价于数值 0：在值为 `null` 的 26,835 行样本中，有 26,443 行（98.5%）精确满足 `pre = input + cache_read + 0`。若 `null` 代表“未知/缺失”，客户端绝无可能据此算出确切的 `num_tokens_preceding`。此推断基于强实测证据；需注意项目中 DSH 曾有“协议可选缓存字段缺省为 0”的先例，但二者合同来源不同。
+- 客户端未记录任何 `reasoning` / 思考 token 字段，映射保持 NULL 并标记为 `reasoning.missing`。
+- 客户端未记录总消耗列，会话与消息级总量口径统一采用派生值 `derived_from_buckets` = `input + output + cache_read + cache_write`。
+- 去重键安全性：54,595 条 assistant 记录归并为 24,434 个唯一定量 `request_id`。在全部 23,533 个多行重复组中，四项 token 计数完全一致（冲突组为 0）；仅 364 组在 `tpot_ms` / `tokens_per_sec` 的浮点末位存在细微差别。全库没有任何 `request_id` 跨会话复用（0 例）。因此，以会话为作用域的 `request_id` 是安全的幂等去重主键。
+- 本机全库去重后的时点累计值（仅作对账参考，非测试输入）：24,434 个请求；`input` 162,230,907、`output` 15,389,071、`cache_read` 2,394,388,158、`cache_creation` 23,004,668。
+- 实测模型分布（`generation_model`）：`swe-2-max` 45,856、`swe-2-high` 4,030、`summarizer` 1,694、`claude-opus-5-5-medium` 1,061、`claude-opus-5-5-high` 691、`swe-2-medium` 398、`gpt-6-luna-high` 362、`claude-fable-5-1-medium` 216、`compactor` 154、`gpt-6-1-sol-xhigh` 123、`swe-1-6-fast` 10。`sessions.model` 记录会话主模型。此类内部模型无公开价格数据，无法进行费用折算，`cost_source = none`。
+- 时间戳口径：`sessions.created_at`、`sessions.last_activity_at` 与 `message_nodes.created_at` 为 Unix 秒级整型；`chat_message.metadata.created_at` 为 RFC3339 纳秒精度 UTC 字符串，请求时间优先采用后者。
+
+### 工程限制与读取策略
+
+整库内存反序列化的读取方式会一次性把整个数据库读入内存，再交给 SQLite 序列化接口重建，后者会再分配一个等大的缓冲区。对于 Devin 达 2.15 GiB 的数据库，全库反序列化将在短时间内产生高达 ~4.4–4.7 GiB 的内存峰值，容易引发 OOM。Devin 采集必须使用独立的只读连接策略（`Data/Collectors/SqliteSnapshot.cs` 的流式临时副本 + `query_only`），规避整库内存复制。
+
+### 可复现只读探针（SQL）
+
+以下为使用 `sqlite3 -readonly "file:sessions.db?mode=ro"` 验证上述结论的只读 SQL 探针，供独立核验：
+
+```sql
+-- 1. 表清单与行数统计
+SELECT 'sessions' AS tbl, count(*) FROM sessions
+UNION ALL SELECT 'message_nodes', count(*) FROM message_nodes
+UNION ALL SELECT 'tool_call_state', count(*) FROM tool_call_state
+UNION ALL SELECT 'subagent_heads', count(*) FROM subagent_heads
+UNION ALL SELECT 'prompt_history', count(*) FROM prompt_history
+UNION ALL SELECT 'rendered_commits', count(*) FROM rendered_commits;
+
+-- 2. 字段覆盖率与空值分布
+SELECT
+  count(*) AS total_assistant_nodes,
+  count(json_extract(chat_message, '$.metadata.request_id')) AS has_request_id,
+  count(json_extract(chat_message, '$.metadata.generation_model')) AS has_model,
+  count(json_extract(chat_message, '$.metadata.metrics.input_tokens')) AS has_input,
+  count(json_extract(chat_message, '$.metadata.metrics.output_tokens')) AS has_output,
+  count(json_extract(chat_message, '$.metadata.metrics.cache_read_tokens')) AS has_cache_read,
+  count(json_extract(chat_message, '$.metadata.metrics.cache_creation_tokens')) AS has_cache_creation_non_null
+FROM message_nodes
+WHERE json_extract(chat_message, '$.role') = 'assistant';
+
+-- 3. cache_creation_tokens 的 json_type 判定
+SELECT
+  json_type(chat_message, '$.metadata.metrics.cache_creation_tokens') AS creation_type,
+  count(*) AS cnt
+FROM message_nodes
+WHERE json_extract(chat_message, '$.role') = 'assistant'
+GROUP BY creation_type;
+
+-- 4. num_tokens_preceding 与 input + cache_read + cache_creation 一致性及子集假说证伪
+--    num_tokens_preceding 是 message_nodes.metadata 列的键，不是 chat_message JSON 的键；
+--    指标四桶仍在 chat_message 的 '$.metadata.metrics' 下，两侧路径不同。
+SELECT
+  count(*) AS checked_rows,
+  sum(CASE WHEN json_extract(metadata, '$.num_tokens_preceding') =
+       (json_extract(chat_message, '$.metadata.metrics.input_tokens') +
+        json_extract(chat_message, '$.metadata.metrics.cache_read_tokens') +
+        coalesce(json_extract(chat_message, '$.metadata.metrics.cache_creation_tokens'), 0))
+      THEN 1 ELSE 0 END) AS additive_exact_matches,
+  sum(CASE WHEN json_extract(chat_message, '$.metadata.metrics.cache_read_tokens') >
+                json_extract(chat_message, '$.metadata.metrics.input_tokens')
+      THEN 1 ELSE 0 END) AS cache_read_greater_than_input_count
+FROM message_nodes
+WHERE json_extract(chat_message, '$.role') = 'assistant'
+  AND json_extract(metadata, '$.num_tokens_preceding') IS NOT NULL;
+
+-- 5. request_id 去重与 token 冲突检测
+SELECT
+  count(*) AS assistant_rows,
+  count(DISTINCT json_extract(chat_message, '$.metadata.request_id')) AS distinct_requests,
+  count(*) - count(DISTINCT json_extract(chat_message, '$.metadata.request_id')) AS duplicate_rows
+FROM message_nodes
+WHERE json_extract(chat_message, '$.role') = 'assistant';
+
+SELECT count(*) AS conflicting_token_groups FROM (
+  SELECT json_extract(chat_message, '$.metadata.request_id') AS req_id
+  FROM message_nodes
+  WHERE json_extract(chat_message, '$.role') = 'assistant'
+  GROUP BY req_id
+  HAVING count(DISTINCT (
+    json_extract(chat_message, '$.metadata.metrics.input_tokens') || ',' ||
+    json_extract(chat_message, '$.metadata.metrics.output_tokens') || ',' ||
+    json_extract(chat_message, '$.metadata.metrics.cache_read_tokens') || ',' ||
+    coalesce(json_extract(chat_message, '$.metadata.metrics.cache_creation_tokens'), -1)
+  )) > 1
+);
+
+-- 6. 全库去重后的时点用量合计
+WITH deduped_requests AS (
+  SELECT
+    json_extract(chat_message, '$.metadata.request_id') AS req_id,
+    min(json_extract(chat_message, '$.metadata.metrics.input_tokens')) AS input_tokens,
+    min(json_extract(chat_message, '$.metadata.metrics.output_tokens')) AS output_tokens,
+    min(json_extract(chat_message, '$.metadata.metrics.cache_read_tokens')) AS cache_read_tokens,
+    min(coalesce(json_extract(chat_message, '$.metadata.metrics.cache_creation_tokens'), 0)) AS cache_creation_tokens
+  FROM message_nodes
+  WHERE json_extract(chat_message, '$.role') = 'assistant'
+  GROUP BY req_id
+)
+SELECT
+  count(*) AS total_requests,
+  sum(input_tokens) AS total_input,
+  sum(output_tokens) AS total_output,
+  sum(cache_read_tokens) AS total_cache_read,
+  sum(cache_creation_tokens) AS total_cache_creation
+FROM deduped_requests;
+```
+
+## Command Code（CLI / VS Code，2026-10-19）
+
+本机安装的 `command-code` npm 包版本为 1.74.3（全局包路径 `%LOCALAPPDATA%\nvm\v22.23.2\node_modules\command-code`），数据目录为 `~/.commandcode`；会话位于 `~/.commandcode/projects/<project-slug>/<session-id>.jsonl`，同级还有 `.meta.json`、`.checkpoints.jsonl`、`.prompts.jsonl`、`.share.json` 等 sidecar。官方包内 `bundled/command-code-knowledge/reference/sessions.md` 明确：首行是 session header，后续每条记录是消息、模型/effort 变更、压缩摘要等；消息记录带 token usage 与 cost；文件 append-only，条目形成树，`/rewind` 与 fork 会保留分支。
+
+本机样本（2026-10-19）：
+
+- header：`{"type":"session","version":3,"id":"...","timestamp":"2026-09-23T22:12:11.875Z","cwd":"..."}`。
+- assistant 消息：`{"type":"message","id":"...","timestamp":"...Z","message":{"role":"assistant","meta":{"createdAt":1790201531862}},"usage":{"inputTokens":21151,"outputTokens":147,"cacheReadTokens":7424,"cacheWriteTokens":0,"costUsd":0.002169522},"model":"deepseek/deepseek-v4.1-flash"}`。
+- 本机 26 个会话文件、约 4 983 条 message 事件、2 453 条带 usage 的 assistant 消息；`type` 只有 `session` / `message`。用户消息、system、tool 与无 usage 的 assistant 不进入请求统计。
+
+Token 语义验证：Command Code 使用 AI SDK 的 `totalUsage`，`inputTokens` 是总输入，`inputTokenDetails.cacheReadTokens/cacheWriteTokens` 是其明细。本机 `deepseek/deepseek-v4.1-flash` 样本的 `costUsd = 0.002169522`，与官方价目（input $0.15/M、output $0.6/M、cache read $0.003/M）按 `(21151−7424)×0.15/M + 7424×0.003/M + 147×0.6/M` 精确相等；若把 input 当作未缓存输入则会得到 0.003283122，明显不符。因此采集器先计算 `input = inputTokens − cacheReadTokens − cacheWriteTokens`，再按四桶归一化；cache 之和大于 input 时 input 保持未知，不饱和或补零。reasoning 字段未提供，保持 NULL。
+
+时间与去重：请求时间优先顶层 `timestamp`（ISO 8601 UTC，3 位毫秒），回退 `message.meta.createdAt`（Unix 毫秒）；会话开始取 header timestamp，结束取最大消息时间；模型取最新 assistant 消息的 `model`。请求键为 message event `id`，跨文件同一 header `id` 合并；重复 event id 只计一次；保留所有分支的 assistant 用量，不按当前活动分支过滤。坏 JSON 行计 `unparsed` 并标会话 `partial`；缺失根不是错误。同步为完整快照原子替换，提交前复核文件列表与 fingerprint，追加写入撞上扫描时返回 `ChangedDuringScan` 并等待下次同步。
+
+隐私与限制：解析器只反序列化 `type`、`id`、`timestamp`、`model`、`usage`、`message.role`、`message.meta.createdAt`；消息正文、thinking、工具结果、标题与 `costUsd` 不读取、不落盘。未发现官方 home 环境变量，默认只使用 `~/.commandcode/projects`；不把 `history.jsonl` 当会话用量。
+
+## Cline（CLI / 桌面 / VS Code 扩展，2026-10-19）
+
+本机 Cline CLI npm 包版本为 3.0.69（`@cline/*` 依赖），CLI/桌面数据目录由 `CLINE_DATA_DIR` 指定，否则 `CLINE_DIR/data`，否则 `~/.cline/data`；会话位于 `<data>/sessions/<id>/<id>.json` 与 `<id>.messages.json`。VS Code 扩展的 globalStorage 为 `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev`，其中 `state/taskHistory.json` 保存任务级聚合，`tasks/<id>/ui_messages.json` 保存 `api_req_started` 等 UI 事件，`tasks/<id>/task_metadata.json` 保存 `model_usage`。同机还存在 Code/Insiders/Cursor/VSCodium 变体路径，采集器逐一发现。
+
+本机样本（2026-10-19）：
+
+- CLI session：`session_id`、`started_at`/`ended_at`（ISO UTC 毫秒）、`provider`、`model`、`cwd`、`workspace_root`、`metadata.usage` 与 `metadata.aggregateUsage`（inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens/totalCost）。
+- CLI messages：`messages[].metrics`（inputTokens/outputTokens/cacheReadTokens/cacheWriteTokens/cost）与 `modelInfo.id`；本机 3 个 CLI 会话，样本 input 5 493 / output 168 / cache 0。
+- VS Code `taskHistory.json` 条目：`id`、`ts`（Unix 毫秒）、`cwdOnTaskInitialization`、`tokensIn`、`tokensOut`、`cacheWrites`、`cacheReads`、`totalCost`；本机 2 个任务均为 0 usage。
+- VS Code `ui_messages.json` 的 `api_req_started.text` 是 JSON 字符串，含 `tokensIn`、`tokensOut`、`cacheWrites`、`cacheReads`、`cost`；`request` 字段含提示词，禁止读取/落盘。
+- VS Code `task_metadata.json` 的 `model_usage` 使用 snake_case `model_id` / `model_provider_id`，不是 camelCase；采集器按 `ts` 选择会话主模型，并为请求选择不晚于请求时间的最近模型。
+
+Token 语义验证：Cline 自身 `@cline/core` 的 `agent-events.d.ts` 明确说明 `tokensIn` 是 **uncached input**，cache read/write 是互不重叠的独立桶，`sum(tokensIn + cacheReadTokens + cacheWriteTokens)` 等于总输入；`tokensOut` 未拆分 reasoning，保持 NULL。因此归一化为 input=tokensIn/inputTokens、output=tokensOut/outputTokens、cache_read/cache_write 独立、reasoning=NULL，四桶相加为总量；cache write 计入 countedCacheWriteTokens。
+
+会话与完整度：CLI 优先 `metadata.aggregateUsage`，其次 `metadata.usage`，缺失时按消息 `metrics` 求和；VS Code 优先 `taskHistory` 聚合，缺失时按 `api_req_started` 求和。有客户端聚合时使用 `client_reported`，请求求和与聚合不一致则 `partial`；无请求明细为 `none`；字段缺失保持 NULL，实测 0 保留 0。CLI 请求键为 message `id`；VS Code 请求键为 `api_req_started` 的 `ts` + 索引；跨 CLI/VS Code 同会话 id 只保留请求更多的一侧（相同偏好 CLI），不重复计数。坏 JSON/字段计 `unparsed`，不读取任务标题、提示词、`api_conversation_history.json` 或消息正文。同步为完整快照原子替换，提交前复核所有参与文件 size/mtime，变化返回 `ChangedDuringScan`；缺失一个来源不阻塞另一个来源。
+
+## Pi Agent（@earendil-works/pi-coding-agent，2026-10-19）
+
+本机安装的 `@earendil-works/pi-coding-agent` 版本为 1.0.4，数据目录为 `~/.pi/agent`；会话位于 `~/.pi/agent/sessions/<project-slug>/<timestamp>_<uuid>.jsonl`，本机 116 个文件、115 个有 assistant 用量的会话。客户端支持的 `PI_CODING_AGENT_SESSION_DIR` / `PI_CODING_AGENT_DIR` 分别指向会话目录或 agent 根目录；采集器按此顺序回退，默认 `~/.pi/agent/sessions`。
+
+本机样本（2026-10-19）：
+
+- header：`{"type":"session","version":3,"id":"...","timestamp":"2026-08-24T19:06:13.633Z","cwd":"..."}`。
+- assistant 行：`{"type":"message","id":"...","timestamp":"...Z","message":{"role":"assistant","model":"...","usage":{"input":1466,"output":51,"cacheRead":512,"cacheWrite":0,"reasoning":26,"totalTokens":2029,"cost":{...}},"timestamp":1787598438344}}`。
+- 其他行包括 user/tool 消息、模型切换和 thinking level 变更；只有 assistant 且带 `usage` 的行进入请求统计。
+
+Token 语义验证：全部 9 866 条 usage 记录满足 `totalTokens == input + output + cacheRead + cacheWrite`（9 866/9 866），`cacheRead > input` 出现在 9 176 条，说明 cache read 是独立桶而不是 input 子集；`reasoning <= output` 出现在全部记录，说明 reasoning 是 output 明细。因此归一化为 input/output/cacheRead/cacheWrite 四个互不重叠的桶，reasoning 从 output 拆出，总量采用客户端 `totalTokens`；`cache_write_counts_in_total = true`。
+
+去重与完整度：会话键为 header `id`，请求键为 message event `id`（缺失时 `line:<n>`）；请求时间优先行 ISO `timestamp`，回退 `message.timestamp`（Unix 毫秒）；会话开始取 header，结束取最大请求时间，模型取最新 assistant 模型。坏行计 `unparsed` 并标 `partial`，重复事件 id 只计一次；用户/工具/模型变更事件忽略，不读取 content、tool 参数或 cost。同步为完整快照原子替换，提交前复核文件列表与 fingerprint，变化返回 `ChangedDuringScan`；缺失根不是错误。
+
+与 Pi Desktop 的关系：Pi Desktop 读取 `~/.pi-desktop/sessions` 的 schema 1 格式（`sessionId` / `createdAt` / `meta.usage`）；Pi Agent 是 v3 格式（`id` / `timestamp` / `message.usage`），两者路径和字段不同，不能只改目录名复用。TokenView 将其作为独立客户端 `pi_agent`，不把两者数据相加；图标使用本地内置的通用终端字形（`ClientIconData` 中 `pi_agent` 的终端路径），避免误用代表 Inflection AI 的 LobeHub `Pi` 图标。
+
+## Qoder（IDE / CLI，2026-10-19）
+
+本机安装 Qoder CLI 1.1.69 与 Qoder / QoderCN IDE。CLI 会话位于 `~/.qoder/projects/<project-slug>/<session-id>.jsonl`（CN 对应 `~/.qoder-cn/projects`），本机 1 个会话、559 行、218 条 assistant 记录；顶层字段为 `type`、`sessionId`、`timestamp`、`uuid`、`isSidechain`、`cwd`、`message`，`message` 内含 `id/model/usage`。assistant 行的 `timestamp` 是 ISO 8601 UTC 字符串，`runtime-config` / `active-leaf` 行则是 Unix 毫秒整数；解析器两种都接受，非 assistant/usage 行按设计忽略、不计 `unparsed`。`type=assistant` 且带 `message.usage` 的 102 条记录使用 Anthropic 形状 `input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens`；本机 102 条全部为 0，同时 `credits` 非零（合计 11.015），说明 CLI 本地可能不写真实 token、只写额度；采集器保留本地原值，不做估算。
+
+同机还有 `%APPDATA%/com.qoder.app.stable/main.sqlite`（Qoder 桌面 UI 投影）：`chat_session_context_usage` 的 `tokenCountsAvailable=false`、`totalTokens=0`，消息 `payload_json` 不含 usage，且会话与 CLI `~/.qoder/projects` 重叠；采集器不读取它，避免重复计数。IDE 数据位于 `%APPDATA%\Qoder\SharedClientCache\cache\db\local.db` 与 `%APPDATA%\QoderCN\SharedClientCache\cache\db\local.db`（macOS/Linux 对应目录）。本机 Qoder 国际版库为空，QoderCN 库有 2 个 `chat_session`、157 条 `chat_message`；其中 64 条 `role=assistant` 且带 `token_info`，形态为 `{"prompt_tokens":22476,"completion_tokens":271,"cached_tokens":0,"max_input_tokens":200000}`，`model_info` 为 `{"model_key":"gm51model"}`，时间列为 Unix 毫秒 `gmt_create`。64 条合计 prompt 4 584 220、cached 4 442 233、completion 34 385；`cached_tokens` 是 `prompt_tokens` 的明细，因此规范化为 input=141 987、cache_read=4 442 233、output=34 385、总量 4 618 605。`chat_message` 的 `content`、`tool_result`、`extra` 与记忆/向量表不读取。
+
+Token 语义验证：IDE `prompt_tokens` 包含 `cached_tokens`（本机 64 条中 cached 均不超过 prompt），归一化时必须先扣除以避免重复计数；reasoning 与 cache write 未提供，保持 NULL。CLI 字段是 Anthropic 形状的独立桶，cache read/write 均计入总量；本机全零只能证明字段存在，不能证明非零关系，因此沿用 Anthropic 契约并在文档中标注样本限制。会话总量按去重请求求和，不采用任何客户端总量字段。
+
+去重与完整度：IDE 会话键 `chat_session.session_id`、请求键 `chat_message.id`；CLI 会话键 `sessionId`、请求键 `message.id`（缺失时 `uuid`，再缺失时行号）。CLI 同一 message id 的流式重写保留最后一条（本机 102 个 usage id 均唯一，另有 116 条无 usage 的重写行）；跨 IDE/CLI 同会话 id 只保留请求更多的一侧。坏 JSON / `token_info` 计 `unparsed` 并标 `partial`，无 assistant 用量为 `none`。IDE 库通过 `SqliteSnapshot` 读取主库 + WAL 已提交快照；由于 WAL 提交不一定改变主库 mtime，存在 IDE 库时每次同步都重新解析。提交前复核文件指纹与数据库 signature，变化返回 `ChangedDuringScan`。
+
+## CodeArts（Huawei CodeArts，2026-10-20）
+
+会话位于 `~/.codearts/kernel/sessions/**/meta.json`，同目录的 `messages.index.jsonl` 提供请求级用量；`history.jsonl` 正文不读取。根目录可用 `CODEARTS_SESSIONS_DIR` 覆盖，其次 `CODEARTS_HOME`，默认 `~/.codearts/kernel/sessions`。
+
+`meta.json` 提供 `session_id`（缺失时用目录名）、`created_at` / `updated_at`、`working_directory`、`parent`、`current_model.model_id` 与可选的会话级 `input_tokens` / `output_tokens` / `reasoning_tokens` / `used_tokens`；`messages.index.jsonl` 的 `token_usage` 提供 `prompt_tokens` / `completion_tokens` / `cached_tokens` / `reasoning_tokens` / `total_tokens`。
+
+Token 语义：`prompt_tokens` 已包含缓存读取，`completion_tokens` 已包含 reasoning，`total = prompt + completion`。归一化先扣除缓存与 reasoning，避免重复计数（语义 ID `codearts.usage.v1`）；字段缺失保持未知，不推算。会话总量优先采用客户端 `used_tokens`，缺失时按去重请求求和。
+
+去重与完整度：会话键为 `session_id`，请求键为行内 `id`；缺失 `id` 计入 `unparsed`，不导入该请求。整客户端快照原子替换，重复扫描幂等；坏行计 `unparsed` 并标 `partial`，根目录缺失不是错误。
+
+## Trae（暂不自动采集，2026-10-19）
+
+Trae / Trae CN 的 AI 会话数据位于 `%APPDATA%\Trae\ModularData\ai-agent\database.db` 与 `%APPDATA%\Trae CN\ModularData\ai-agent\database.db`（macOS/Linux 对应目录），本机两个库分别约 20 MB / 30 MB。该文件不是明文 SQLite：文件头不是 `SQLite format 3\0`，实际为 SQLCipher 4（AES-256-CBC、PBKDF2-HMAC-SHA512 256000 次、每页 HMAC-SHA512）。解密密钥在运行时生成，只存在于 `ai-agent` 进程内存；社区工具需要扫描进程内存（`ReadProcessMemory` / Frida）提取密钥后才能读取。该做法超出 TokenView“只读客户端数据目录、最小采集、不绕过客户端配置”的边界，也会引入高风险进程访问能力，因此**未实现自动采集**，也没有添加会显示 0 用量的占位客户端。
+
+本机可读的 Trae 本地数据均不含 token 用量：`User/globalStorage/state.vscdb` 只有 UI 状态与空的 `chat.ChatSessionStore.index`，`ModularData/ai-agent/sandbox/*.json` 是权限配置，`~/.trae-cn/memory/projects/**/session_memory_*.jsonl` 只有意图/动作/学习摘要，AI agent 日志中也没有 `prompt_tokens` / `input_tokens` 等字段。Trae 官方提供“导出数据”入口，但需要用户在账号设置中手动触发，且导出格式与是否包含 token 尚未本机核验，不能作为自动采集路径。
+
+后续若要在不扫描进程内存的前提下支持 Trae，可评估两条路径：一是解析用户显式导出并解包后的官方数据；二是读取用户自行解密后的 `database.db` 副本（通过显式路径配置），并在文档中标注“需要用户提供解密副本”。两者都应作为独立、可选的导入能力登记架构决策，而不是默认后台扫描。
