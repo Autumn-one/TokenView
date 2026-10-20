@@ -18,19 +18,17 @@ public static class UpdateInstaller
     {
         var root = Path.Combine(Path.GetTempPath(), $"TokenView-update-{Guid.NewGuid():N}");
         var zip = Path.Combine(root, "update.zip");
-        var staging = Path.Combine(root, "app");
         System.IO.Directory.CreateDirectory(root);
         try
         {
             await UpdateService.DownloadAsync(info, zip, progress, cancellationToken);
-            System.IO.Directory.CreateDirectory(staging);
-            await Task.Run(() => ExtractSafely(zip, staging), cancellationToken);
-            if (!File.Exists(Path.Combine(staging, ExecutableName)))
+            await Task.Run(() => ExtractSafely(zip, root), cancellationToken);
+            if (!File.Exists(Path.Combine(root, ExecutableName)))
             {
                 throw new InvalidDataException("更新包缺少 TokenView.Wpf.exe");
             }
             File.Delete(zip);
-            return new PreparedUpdate(info, staging);
+            return new PreparedUpdate(info, root);
         }
         catch
         {
