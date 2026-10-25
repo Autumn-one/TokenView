@@ -36,13 +36,20 @@
                         <StackPanel x:Name="GeneralPanel">
                             <TextBlock Text="通用" Style="{DynamicResource SectionTitle}" />
                             <TextBlock Text="窗口、启动与关闭行为。" Style="{DynamicResource MutedText}" Margin="0,4,0,22" />
-                            <TextBlock Text="关闭主窗口时" Style="{DynamicResource StatLabel}" />
-                            <ComboBox x:Name="CloseBehaviorBox" Width="230" Margin="0,6,0,18"
-                                      SelectionChanged="Setting_Changed">
-                                <ComboBoxItem Content="每次询问" Tag="ask" />
-                                <ComboBoxItem Content="最小化到托盘" Tag="tray" />
-                                <ComboBoxItem Content="直接退出" Tag="exit" />
-                            </ComboBox>
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="关闭主窗口时" Style="{DynamicResource StatLabel}" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="CloseBehaviorBox" Width="230"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          SelectionChanged="Setting_Changed">
+                                    <ComboBoxItem Content="每次询问" Tag="ask" />
+                                    <ComboBoxItem Content="最小化到托盘" Tag="tray" />
+                                    <ComboBoxItem Content="直接退出" Tag="exit" />
+                                </ComboBox>
+                            </Grid>
                             <CheckBox x:Name="AutostartCheck" Content="开机自启" Margin="0,4,0,10"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed" />
                             <CheckBox x:Name="AutostartHiddenCheck" Content="开机启动时隐藏到托盘" Margin="0,0,0,10"
@@ -56,34 +63,55 @@
                         <StackPanel x:Name="AppearancePanel" Visibility="Collapsed">
                             <TextBlock Text="外观与统计" Style="{DynamicResource SectionTitle}" />
                             <TextBlock Text="主题、Token 格式与默认日期范围。" Style="{DynamicResource MutedText}" Margin="0,4,0,22" />
-                            <TextBlock Text="主题" Style="{DynamicResource StatLabel}" />
-                            <ComboBox x:Name="ThemeBox" Width="230" Margin="0,6,0,18"
-                                      SelectionChanged="Setting_Changed">
-                                <ComboBoxItem Content="跟随系统" Tag="system" />
-                                <ComboBoxItem Content="浅色" Tag="light" />
-                                <ComboBoxItem Content="深色" Tag="dark" />
-                            </ComboBox>
-                            <TextBlock Text="Token 显示" Style="{DynamicResource StatLabel}" />
-                            <ComboBox x:Name="TokenDisplayBox" Width="230" Margin="0,6,0,18"
-                                      SelectionChanged="Setting_Changed">
-                                <ComboBoxItem Content="自动" Tag="auto" />
-                                <ComboBoxItem Content="中文单位" Tag="chinese" />
-                                <ComboBoxItem Content="K" Tag="k" />
-                                <ComboBoxItem Content="M" Tag="m" />
-                                <ComboBoxItem Content="B" Tag="b" />
-                                <ComboBoxItem Content="精确值" Tag="exact" />
-                            </ComboBox>
-                            <TextBlock Text="默认统计范围" Style="{DynamicResource StatLabel}" />
-                            <ComboBox x:Name="DefaultRangeBox" Width="230" Margin="0,6,0,18"
-                                      SelectionChanged="Setting_Changed">
-                                <ComboBoxItem Content="今天" Tag="today" />
-                                <ComboBoxItem Content="最近 7 天" Tag="7d" />
-                                <ComboBoxItem Content="本周" Tag="week" />
-                                <ComboBoxItem Content="本月" Tag="month" />
-                                <ComboBoxItem Content="最近 30 天" Tag="30d" />
-                                <ComboBoxItem Content="最近 90 天" Tag="90d" />
-                                <ComboBoxItem Content="全部" Tag="all" />
-                            </ComboBox>
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="主题" Style="{DynamicResource StatLabel}" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="ThemeBox" Width="230"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          SelectionChanged="Setting_Changed">
+                                    <ComboBoxItem Content="跟随系统" Tag="system" />
+                                    <ComboBoxItem Content="浅色" Tag="light" />
+                                    <ComboBoxItem Content="深色" Tag="dark" />
+                                </ComboBox>
+                            </Grid>
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Token 显示" Style="{DynamicResource StatLabel}" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="TokenDisplayBox" Width="230"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          SelectionChanged="Setting_Changed">
+                                    <ComboBoxItem Content="自动" Tag="auto" />
+                                    <ComboBoxItem Content="中文单位" Tag="chinese" />
+                                    <ComboBoxItem Content="K" Tag="k" />
+                                    <ComboBoxItem Content="M" Tag="m" />
+                                    <ComboBoxItem Content="B" Tag="b" />
+                                    <ComboBoxItem Content="精确值" Tag="exact" />
+                                </ComboBox>
+                            </Grid>
+                            <Grid Margin="0,0,0,18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="默认统计范围" Style="{DynamicResource StatLabel}" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="DefaultRangeBox" Width="230"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          SelectionChanged="Setting_Changed">
+                                    <ComboBoxItem Content="今天" Tag="today" />
+                                    <ComboBoxItem Content="最近 7 天" Tag="7d" />
+                                    <ComboBoxItem Content="本周" Tag="week" />
+                                    <ComboBoxItem Content="本月" Tag="month" />
+                                    <ComboBoxItem Content="最近 30 天" Tag="30d" />
+                                    <ComboBoxItem Content="最近 90 天" Tag="90d" />
+                                    <ComboBoxItem Content="全部" Tag="all" />
+                                </ComboBox>
+                            </Grid>
                         </StackPanel>
 
                         <StackPanel x:Name="CollectionPanel" Visibility="Collapsed">
@@ -93,15 +121,22 @@
                                       Checked="Setting_Changed" Unchecked="Setting_Changed" />
                             <CheckBox x:Name="SyncOnStartCheck" Content="启动时采集" Margin="0,0,0,10"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed" />
-                            <TextBlock Text="后台采集频率" Style="{DynamicResource StatLabel}" />
-                            <ComboBox x:Name="SyncIntervalBox" Width="230" Margin="0,6,0,20"
-                                      SelectionChanged="Setting_Changed">
-                                <ComboBoxItem Content="关闭" Tag="0" />
-                                <ComboBoxItem Content="每 1 分钟" Tag="1" />
-                                <ComboBoxItem Content="每 5 分钟" Tag="5" />
-                                <ComboBoxItem Content="每 15 分钟" Tag="15" />
-                                <ComboBoxItem Content="每 30 分钟" Tag="30" />
-                            </ComboBox>
+                            <Grid Margin="0,0,0,20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="后台采集频率" Style="{DynamicResource StatLabel}" VerticalAlignment="Center" />
+                                <ComboBox Grid.Column="1" x:Name="SyncIntervalBox" Width="230"
+                                          HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          SelectionChanged="Setting_Changed">
+                                    <ComboBoxItem Content="关闭" Tag="0" />
+                                    <ComboBoxItem Content="每 1 分钟" Tag="1" />
+                                    <ComboBoxItem Content="每 5 分钟" Tag="5" />
+                                    <ComboBoxItem Content="每 15 分钟" Tag="15" />
+                                    <ComboBoxItem Content="每 30 分钟" Tag="30" />
+                                </ComboBox>
+                            </Grid>
                             <TextBlock Text="客户端来源" Style="{DynamicResource StatLabel}" Margin="0,4,0,8" />
                             <StackPanel x:Name="ClientListPanel" />
                             <TextBlock Text="重扫会重新读取该客户端当前可访问的数据；缺失字段保持未知，不估算、不补零。"
@@ -149,12 +184,15 @@
                         </StackPanel>
 
                         <StackPanel x:Name="AboutPanel" Visibility="Collapsed">
-                            <TextBlock Text="关于 TokenView" Style="{DynamicResource SectionTitle}" />
-                            <TextBlock Text="本地优先的 AI 编程客户端用量统计。" Style="{DynamicResource MutedText}" Margin="0,4,0,20" />
-                            <TextBlock x:Name="AboutVersionText" Text="版本 0.1.10"
-                                       Style="{DynamicResource StatLabel}" />
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="关于 TokenView" Style="{DynamicResource SectionTitle}" />
+                                <TextBlock x:Name="AboutVersionText" Text="版本 0.1.10"
+                                           Style="{DynamicResource StatLabel}"
+                                           Margin="8,0,0,2" VerticalAlignment="Bottom" />
+                            </StackPanel>
+                            <TextBlock Text="本地优先的 AI 编程客户端用量统计。" Style="{DynamicResource MutedText}" Margin="0,4,0,22" />
 
-                            <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="0,22,0,20" />
+                            <Border Height="1" Background="{DynamicResource BorderBrush}" Margin="0,0,0,20" />
 
                             <Grid>
                                 <TextBlock Text="动态信息" Style="{DynamicResource SectionTitle}" />
