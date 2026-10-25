@@ -13,7 +13,7 @@ namespace TokenView.Wpf.Data.Collectors;
 public sealed class QoderCollector : IClientCollector
 {
     private const string Client = "qoder";
-    private const long ParserVersion = 1;
+    private const long ParserVersion = 4;
 
     private readonly IReadOnlyList<string> _cliRoots;
     private readonly IReadOnlyList<string> _databases;
@@ -460,16 +460,36 @@ public sealed class QoderCollector : IClientCollector
                 {
                     return;
                 }
-                if (entry.Message is not { } message || message.Raw is not { } raw)
+                if (entry.Message is not { } message || !message.HasUsage)
                 {
                     return;
+                }
+                // 未启用 EXPOSE_TOKEN_USAGE 的历史记录会被运行时清零；新记录优先使用实测值。
+                RawTokenCounts raw;
+                var estimated = false;
+                if (message.Raw is { } counts && !IsPlaceholderUsage(counts))
+                {
+                    raw = CliCounts(counts);
+                }
+                else if (QoderCliEstimate.Compute(message.ContextUsageRatio, message.OutputChars)
+                         is { } estimate)
+                {
+                    raw = estimate;
+                    estimated = true;
+                }
+                else
+                {
+                    raw = new RawTokenCounts();
                 }
                 if (!CollectorSupport.ValidCounts(raw))
                 {
                     unparsed++;
                     return;
                 }
-                var key = !string.IsNullOrEmpty(message.Id)
+                var requestId = message.RequestId ?? entry.RequestId;
+                var key = !string.IsNullOrEmpty(requestId)
+                    ? "request:" + requestId
+                    : !string.IsNullOrEmpty(message.Id)
                     ? "message:" + message.Id
                     : !string.IsNullOrEmpty(entry.Uuid)
                         ? "uuid:" + entry.Uuid
@@ -479,8 +499,13 @@ public sealed class QoderCollector : IClientCollector
                 var meta = new RequestMeta(key, model, null, entry.TimestampMs, entry.TimestampMs,
                     entry.IsSidechain ?? false, sourceRef);
                 var record = QoderMessage(TokenSemanticsCatalog.QoderCli,
-                    sessionId ?? fallbackId, meta, raw, current);
-                candidates[key] = new CliCandidate(current, record, raw);
+                    sessionId ?? fallbackId, meta, raw, current, estimated);
+                // 同一请求可能多次输出或拆成多个消息块；已取得的实测值不能被后续占位覆盖。
+                if (!candidates.TryGetValue(key, out var previous) ||
+                    CliQuality(record) >= CliQuality(previous.Message))
+                {
+                    candidates[key] = new CliCandidate(current, record, raw);
+                }
             });
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -513,9 +538,40 @@ public sealed class QoderCollector : IClientCollector
             }
         }
 
+        // 开关前后的请求可以处在同一会话；历史估算不能混入该会话的实测总量。
+        var mixed = messages.Any(message => message.SourceKind == SourceKind.Estimated) &&
+                    messages.Any(message => message.SourceKind != SourceKind.Estimated);
+        var sessionMessages = mixed
+            ? messages.Select(message => message.SourceKind == SourceKind.Estimated
+                ? message with { Usage = UsageNormalizer.Normalize(TokenSemanticsCatalog.QoderCli, default) }
+                : message).ToList()
+            : messages;
+        var sessionCounts = mixed
+            ? ordered.Select(candidate => candidate.Message.SourceKind == SourceKind.Estimated
+                ? default : candidate.Raw).ToList()
+            : counts;
         var session = RequestBuilder.SessionWithSemantics(Client, TokenSemanticsCatalog.QoderCli,
-            new SessionMeta(id, null, project, start, end), messages, counts, unparsed > 0);
+            new SessionMeta(id, null, project, start, end), sessionMessages, sessionCounts, unparsed > 0);
+        if (messages.Count > 0 && messages.All(message => message.SourceKind == SourceKind.Estimated))
+        {
+            session = session with { SourceKind = SourceKind.Estimated };
+        }
         return new Parsed([SessionImport.Create(session, messages, path)], unparsed);
+    }
+
+    private static int CliQuality(MessageRecord message) => message.Usage.TotalTokens is null
+        ? 0 : message.SourceKind == SourceKind.Estimated ? 1 : 2;
+
+    /// <summary>Qoder 原生输入直接来自 prompt_tokens，已包含读取及写入缓存。</summary>
+    private static RawTokenCounts CliCounts(RawTokenCounts raw)
+    {
+        long? uncached = null;
+        if (raw.Input is { } input && raw.CacheRead is { } read && raw.CacheWrite is { } write &&
+            input >= read && input - read >= write)
+        {
+            uncached = input - read - write;
+        }
+        return raw with { Input = uncached };
     }
 
     private static bool TryReadCliEntry(string line, out CliEntry entry)
@@ -539,6 +595,8 @@ public sealed class QoderCollector : IClientCollector
             }
             if (!TryOptionalString(root, out var kind, "type") ||
                 !TryOptionalString(root, out var sessionId, "sessionId") ||
+                !TryOptionalString(root, out var sdkSessionId, "session_id") ||
+                !TryOptionalString(root, out var requestId, "request_id") ||
                 !TryOptionalString(root, out var uuid, "uuid") ||
                 !TryOptionalString(root, out var cwd, "cwd") ||
                 !TryOptionalBoolean(root, out var isSidechain, "isSidechain") ||
@@ -547,7 +605,8 @@ public sealed class QoderCollector : IClientCollector
             {
                 return false;
             }
-            entry = new CliEntry(kind, sessionId, timestamp, uuid, isSidechain, cwd, message);
+            entry = new CliEntry(kind, sessionId ?? sdkSessionId, timestamp, uuid, isSidechain, cwd,
+                requestId, message);
             return true;
         }
     }
@@ -566,20 +625,27 @@ public sealed class QoderCollector : IClientCollector
             case JsonValueKind.Object:
                 if (!TryOptionalString(property, out var id, "id") ||
                     !TryOptionalString(property, out var model, "model") ||
-                    !TryOptionalUsage(property, out var raw, "usage"))
+                    !TryOptionalUsage(property, out var raw, "usage", out var hasUsage,
+                        out var contextUsageRatio, out var requestId))
                 {
                     return false;
                 }
-                message = new CliMessage(id, model, raw);
+                message = new CliMessage(id, model, raw, hasUsage, contextUsageRatio,
+                    raw is { } counts && !IsPlaceholderUsage(counts) ? 0 : OutputContentChars(property),
+                    requestId);
                 return true;
             default:
                 return false;
         }
     }
 
-    private static bool TryOptionalUsage(JsonElement element, out RawTokenCounts? raw, string name)
+    private static bool TryOptionalUsage(JsonElement element, out RawTokenCounts? raw, string name,
+        out bool present, out double? contextUsageRatio, out string? requestId)
     {
         raw = null;
+        present = false;
+        contextUsageRatio = null;
+        requestId = null;
         if (!element.TryGetProperty(name, out var property))
         {
             return true;
@@ -589,7 +655,9 @@ public sealed class QoderCollector : IClientCollector
             case JsonValueKind.Null:
                 return true;
             case JsonValueKind.Object:
-                if (!TryOptionalCount(property, out var input, "input_tokens", "inputTokens") ||
+                present = true;
+                if (!TryOptionalString(property, out requestId, "request_id") ||
+                    !TryOptionalCount(property, out var input, "input_tokens", "inputTokens") ||
                     !TryOptionalCount(property, out var output, "output_tokens", "outputTokens") ||
                     !TryOptionalCount(property, out var cacheRead,
                         "cache_read_input_tokens", "cacheReadInputTokens") ||
@@ -598,6 +666,7 @@ public sealed class QoderCollector : IClientCollector
                 {
                     return false;
                 }
+                TryOptionalRatio(property, "context_usage_ratio", out contextUsageRatio);
                 if (input is null && output is null && cacheRead is null && cacheWrite is null)
                 {
                     return true;
@@ -607,6 +676,57 @@ public sealed class QoderCollector : IClientCollector
             default:
                 return false;
         }
+    }
+
+    private static void TryOptionalRatio(JsonElement element, string name, out double? value)
+    {
+        value = null;
+        if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.Number)
+        {
+            return;
+        }
+        if (property.TryGetDouble(out var ratio) && double.IsFinite(ratio) && ratio is > 0 and <= 1)
+        {
+            value = ratio;
+        }
+    }
+
+    /// <summary>只统计数据长度用于 E5 输出估算，正文本身不离开解析过程。</summary>
+    private static long OutputContentChars(JsonElement message)
+    {
+        if (!message.TryGetProperty("content", out var content))
+        {
+            return 0;
+        }
+        if (content.ValueKind == JsonValueKind.String)
+        {
+            return content.GetString()?.Length ?? 0;
+        }
+        if (content.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+        long total = 0;
+        foreach (var block in content.EnumerateArray())
+        {
+            if (block.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+            foreach (var field in new[] { "text", "thinking" })
+            {
+                if (block.TryGetProperty(field, out var text) && text.ValueKind == JsonValueKind.String)
+                {
+                    total += text.GetString()?.Length ?? 0;
+                }
+            }
+            if (block.TryGetProperty("input", out var input) &&
+                input.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+            {
+                total += input.GetRawText().Length;
+            }
+        }
+        return total;
     }
 
     private static bool TryOptionalTimestamp(JsonElement element, out long? millis, string name)
@@ -935,10 +1055,36 @@ public sealed class QoderCollector : IClientCollector
     }
 
     private static MessageRecord QoderMessage(TokenSemantics semantics, string sessionId,
-        RequestMeta meta, RawTokenCounts raw, long seq)
+        RequestMeta meta, RawTokenCounts raw, long seq, bool estimated = false)
     {
         var message = RequestBuilder.MessageWithSemantics(Client, semantics, sessionId, meta, raw);
-        return message with { Seq = seq };
+        return message with
+        {
+            Seq = seq,
+            SourceKind = estimated ? SourceKind.Estimated : SourceKind.Measured,
+        };
+    }
+
+    /// <summary>已提供的 token 字段全部为 0 时是客户端占位符，不是实测零用量。</summary>
+    private static bool IsPlaceholderUsage(RawTokenCounts raw)
+    {
+        var any = false;
+        foreach (var value in new[]
+                 {
+                     raw.Input, raw.Output, raw.CacheRead, raw.CacheWrite, raw.Reasoning, raw.ClientTotal,
+                 })
+        {
+            if (value is not { } number)
+            {
+                continue;
+            }
+            any = true;
+            if (number != 0)
+            {
+                return false;
+            }
+        }
+        return any;
     }
 
     private static bool TryRequiredString(SqliteDataReader reader, int index, out string value)
@@ -1076,9 +1222,11 @@ public sealed class QoderCollector : IClientCollector
         string? Uuid,
         bool? IsSidechain,
         string? Cwd,
+        string? RequestId,
         CliMessage? Message);
 
-    private sealed record CliMessage(string? Id, string? Model, RawTokenCounts? Raw);
+    private sealed record CliMessage(string? Id, string? Model, RawTokenCounts? Raw, bool HasUsage,
+        double? ContextUsageRatio, long OutputChars, string? RequestId);
 
     private sealed record CliCandidate(int Seq, MessageRecord Message, RawTokenCounts Raw);
 

@@ -120,7 +120,7 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 
 完整口径见 `docs/data-metrics.md`，此处为强制约束：
 
-1. **只读**：对客户端数据目录只做读取，绝不写入、移动或删除。
+1. **只读**：对客户端数据目录只做读取，绝不写入、移动或删除。Qoder 采集启用时，允许由服务层自动将当前用户与 TokenView 进程的 `QODER_EXPOSE_TOKEN_USAGE` / `QODERCN_EXPOSE_TOKEN_USAGE` 设置为 `true` 并广播环境变化；这是唯一的采集初始化例外，不修改客户端文件、不重启客户端、不弹窗提醒。
 2. **最小采集**：只提取统计必需元数据（时间、模型、token 计数、会话标识等），不持久化消息正文。
 3. **可溯源分级**：每个指标必须标注来源等级——`measured`（客户端真实记录）、`derived`（由真实字段直接换算）、
    `estimated`（推算，例如按字符数估算 token）。估算不得与实测混在同一数值里。

@@ -112,9 +112,9 @@ public static class TokenSemanticsCatalog
         "Qoder IDE token_info: prompt_tokens includes cached_tokens");
 
     public static readonly TokenSemantics QoderCli = new(
-        "qoder.cli_message.v1", FieldRelation.Separate, FieldRelation.NotProvided,
+        "qoder.cli_message.v2", FieldRelation.Separate, FieldRelation.NotProvided,
         FieldRelation.Separate, true, false,
-        "Qoder CLI message.usage is Anthropic-shaped");
+        "Qoder native runtime copies prompt_tokens including read/write caches; collector subtracts caches before normalization");
 
     public static readonly TokenSemantics Qoder = new(
         "qoder.usage.v1", FieldRelation.Separate, FieldRelation.NotProvided,

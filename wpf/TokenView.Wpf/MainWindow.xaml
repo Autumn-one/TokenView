@@ -163,24 +163,45 @@
                                        VerticalAlignment="Center" />
                             <TextBlock x:Name="RangeDaysText" Grid.Column="1"
                                        Style="{DynamicResource MutedText}"
-                                       Margin="8,0,12,0" VerticalAlignment="Center" />
+                                       Margin="8,0,12,0" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
                             <StackPanel Grid.Column="2" Orientation="Horizontal"
-                                        HorizontalAlignment="Right" VerticalAlignment="Top">
+                                        HorizontalAlignment="Right" VerticalAlignment="Center">
                                 <RadioButton x:Name="MetricTokens" Content="Token" GroupName="Metric" IsChecked="True"
                                              Style="{DynamicResource RangeRadio}" Checked="Metric_Checked" />
                                 <RadioButton x:Name="MetricRequests" Content="请求数" GroupName="Metric"
                                              Style="{DynamicResource RangeRadio}" Checked="Metric_Checked" />
+                                <Border Background="{DynamicResource ChipBrush}" CornerRadius="6"
+                                        Padding="2" Margin="16,0,0,0" VerticalAlignment="Center"
+                                        ToolTip="切换图表浮窗的分组方式">
+                                    <StackPanel Orientation="Horizontal">
+                                        <RadioButton x:Name="ChartClientTab" Content="客户端"
+                                                     GroupName="ChartBreakdown" FontSize="12"
+                                                     Style="{DynamicResource TooltipTabRadio}"
+                                                     AutomationProperties.Name="浮窗按客户端分组"
+                                                     IsChecked="True" Checked="ChartBreakdown_Checked" />
+                                        <RadioButton x:Name="ChartModelTab" Content="模型"
+                                                     GroupName="ChartBreakdown" FontSize="12"
+                                                     Style="{DynamicResource TooltipTabRadio}"
+                                                     AutomationProperties.Name="浮窗按模型分组"
+                                                     Checked="ChartBreakdown_Checked" />
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </Grid>
 
                         <Grid Margin="0,18,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="2*" />
                                 <ColumnDefinition Width="2*" />
                                 <ColumnDefinition Width="2*" />
                             </Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="已知 Token" Style="{DynamicResource StatLabel}" />
+                                <TextBlock Text="Token 用量" Style="{DynamicResource StatLabel}" />
                                 <TextBlock x:Name="TokensValue" Text="—" Style="{DynamicResource StatValue}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1">
@@ -191,6 +212,10 @@
                                 <TextBlock Text="会话数" Style="{DynamicResource StatLabel}" />
                                 <TextBlock x:Name="SessionsValue" Text="—" Style="{DynamicResource StatValue}" />
                             </StackPanel>
+                            <TextBlock x:Name="EstimateNote" Grid.Row="1" Grid.ColumnSpan="3"
+                                       Style="{DynamicResource MutedText}" FontSize="11"
+                                       Margin="0,10,0,0" TextWrapping="Wrap"
+                                       Visibility="Collapsed" />
                         </Grid>
 
                         <Grid Height="250" Margin="0,14,0,0" Panel.ZIndex="10">
@@ -198,15 +223,14 @@
                                                        Accent="{DynamicResource AccentBrush}"
                                                        GridBrush="{DynamicResource ChartGridBrush}"
                                                        MutedBrush="{DynamicResource MutedBrush}"
+                                                       AutomationProperties.Name="请求用量趋势图"
                                                        MouseMove="LineChart_MouseMove"
                                                        MouseLeave="LineChart_MouseLeave" />
-                            <Canvas x:Name="ChartOverlay">
+                            <Canvas x:Name="ChartOverlay" IsHitTestVisible="False">
                                 <Border x:Name="ChartTooltip" Visibility="Collapsed"
                                         Background="{DynamicResource CardBrush}" BorderBrush="{DynamicResource BorderBrush}"
                                         BorderThickness="1" CornerRadius="8" Padding="12" MinWidth="210"
-                                        MaxWidth="320"
-                                        MouseEnter="ChartTooltip_MouseEnter"
-                                        MouseLeave="ChartTooltip_MouseLeave">
+                                        MaxWidth="320">
                                     <StackPanel>
                                         <TextBlock x:Name="TooltipTitle" FontSize="12" FontWeight="SemiBold"
                                                    Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap" />
@@ -218,22 +242,6 @@
                                                    Foreground="{DynamicResource TextBrush}" />
                                         <TextBlock x:Name="TooltipUnknown" FontSize="11" Margin="0,2,0,0"
                                                    Foreground="{DynamicResource MutedBrush}" />
-                                        <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
-                                            <Border Background="{DynamicResource ChipBrush}" CornerRadius="6"
-                                                    Padding="2">
-                                                <StackPanel Orientation="Horizontal">
-                                                    <RadioButton x:Name="TooltipClientTab" Content="客户端"
-                                                                 GroupName="TooltipDimension"
-                                                                 Style="{DynamicResource TooltipTabRadio}"
-                                                                 IsChecked="True"
-                                                                 Checked="TooltipDimension_Checked" />
-                                                    <RadioButton x:Name="TooltipModelTab" Content="模型"
-                                                                 GroupName="TooltipDimension"
-                                                                 Style="{DynamicResource TooltipTabRadio}"
-                                                                 Checked="TooltipDimension_Checked" />
-                                                </StackPanel>
-                                            </Border>
-                                        </StackPanel>
                                         <ItemsControl x:Name="TooltipBreakdown" Margin="0,6,0,0">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
@@ -365,7 +373,7 @@
                         <Grid>
                             <StackPanel>
                                 <TextBlock Text="客户端用量分布" Style="{DynamicResource CardTitle}" />
-                                <TextBlock Text="按请求发生日期 · 已知 Token" Style="{DynamicResource MutedText}"
+                                <TextBlock Text="按请求发生日期 · Token 用量" Style="{DynamicResource MutedText}"
                                            Margin="0,3,0,0" />
                             </StackPanel>
                         </Grid>
@@ -393,7 +401,7 @@
                                                            FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"
                                                            VerticalAlignment="Center" />
                                                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                                                    <TextBlock Text="{Binding Share, StringFormat={}{0:P1}}"
+                                                    <TextBlock Text="{Binding ShareText}"
                                                                Style="{DynamicResource MutedText}" VerticalAlignment="Center" />
                                                     <TextBlock Text="{Binding ExpandGlyph}" FontSize="10"
                                                                Foreground="{DynamicResource MutedBrush}" Margin="8,0,0,0"
@@ -401,6 +409,7 @@
                                                 </StackPanel>
                                             </Grid>
                                             <local:ShareBar Margin="18,7,0,5" Value="{Binding Share}"
+                                                            Visibility="{Binding HasKnownTokens, Converter={StaticResource BoolToVisibility}}"
                                                             TrackBrush="{DynamicResource TrackBrush}"
                                                             BarBrush="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}" />
                                             <Grid Margin="18,0,0,0">
@@ -408,12 +417,20 @@
                                                 <TextBlock Text="{Binding TokenText}" Style="{DynamicResource MutedText}"
                                                            HorizontalAlignment="Right" />
                                             </Grid>
+                                            <TextBlock Text="{Binding EstimateText}" Margin="18,3,0,0"
+                                                       FontSize="10.5" Foreground="{DynamicResource MutedBrush}"
+                                                       Visibility="{Binding HasEstimate, Converter={StaticResource BoolToVisibility}}"
+                                                       ToolTip="估算值：上下文占比 × 200,000 + 输出字符数 ÷ 4 · 置信度约 0.8" />
                                         </StackPanel>
                                         <Border Margin="18,9,0,0" Padding="10,8" CornerRadius="8"
                                                 Background="{DynamicResource ChipBrush}"
                                                 Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVisibility}}">
                                             <StackPanel>
-                                                <TextBlock Text="模型 · 按请求归属 · 已知 Token"
+                                                <TextBlock Text="模型明细仅含实测用量；估算已单列，未计入"
+                                                           Style="{DynamicResource MutedText}" FontSize="10.5"
+                                                           Margin="2,0,0,5"
+                                                           Visibility="{Binding HasEstimate, Converter={StaticResource BoolToVisibility}}" />
+                                                <TextBlock Text="模型 · 按请求归属 · Token 用量"
                                                            Style="{DynamicResource MutedText}" FontSize="10.5" />
                                                 <ItemsControl ItemsSource="{Binding Models}" Margin="0,6,0,0">
                                                     <ItemsControl.ItemTemplate>
@@ -614,7 +631,7 @@
                         </StackPanel>
                     </Border>
 
-                    <TextBlock Text="会话累计 · 按会话开始日 · 不含估算；明细不完整时仍展示会话累计值，未知总量不计入合计。"
+                    <TextBlock Text="会话累计 · 按会话开始日 · 估算值以 ≈ 标注，且不计入排行与实测合计；明细不完整时仍展示会话累计值，未知总量不计入合计。"
                                Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,12,0,0" />
                 </StackPanel>
             </StackPanel>

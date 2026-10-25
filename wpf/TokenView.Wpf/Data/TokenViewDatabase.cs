@@ -72,6 +72,7 @@ public static class TokenViewDatabase
         }
 
         var hours = ReadHourRows(connection, from, to);
+        var estimates = ReadEstimatedUsage(connection, from, to);
         var totalTokens = hours.Sum(row => row.Tokens);
         var totalRequests = hours.Sum(row => row.Requests);
         var withUsage = hours.Sum(row => row.RequestsWithUsage);
@@ -85,10 +86,10 @@ public static class TokenViewDatabase
         var sessionBuckets = ReadSessionBuckets(connection, from, to, range.IsHourly);
         var points = BuildChartPoints(range, from, to, hours, sessionBuckets);
         var dailyStrip = points
-            .Select(point => new DailyStripRow(point.Label, FormatTokens(point.Tokens)))
+            .Select(point => new DailyStripRow(point.Label, point.TokenText))
             .ToList();
 
-        var clients = ReadClientUsage(connection, from, to, hours, totalTokens);
+        var clients = ReadClientUsage(connection, from, to, hours, totalTokens, estimates);
         var models = ReadRanking(connection, "model", from, to);
         var projects = ReadRanking(connection, "project_path", from, to);
         var recent = ReadRecentSessions(connection, from, to);
@@ -106,6 +107,8 @@ public static class TokenViewDatabase
             Sessions = (int)sessions,
             SessionsPartial = (int)sessionsPartial,
             TotalTokens = totalTokens,
+            EstimatedTokens = estimates.Sum(row => row.Tokens),
+            EstimatedRequests = estimates.Sum(row => row.Requests),
             ChartPoints = points,
             DailyStrip = dailyStrip,
             Clients = clients,
@@ -130,7 +133,7 @@ public static class TokenViewDatabase
             SELECT id, client, COALESCE(project_path, '—'), COALESCE(model, '—'),
                    started_at_ms, ended_at_ms, total_tokens,
                    input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens,
-                   total_basis, message_coverage, unknown_relations
+                   total_basis, message_coverage, unknown_relations, source_kind
             FROM sessions WHERE client = $client AND client_session_id = $sid LIMIT 1;
             """;
         command.Parameters.AddWithValue("$client", clientKey);
@@ -149,7 +152,7 @@ public static class TokenViewDatabase
             DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(4)).LocalDateTime.ToString("yyyy-MM-dd HH:mm");
         var ended = reader.IsDBNull(5) ? "—" :
             DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(5)).LocalDateTime.ToString("yyyy-MM-dd HH:mm");
-        var tokens = reader.IsDBNull(6) ? 0 : reader.GetInt64(6);
+        long? tokens = reader.IsDBNull(6) ? null : reader.GetInt64(6);
         long? input = reader.IsDBNull(7) ? null : reader.GetInt64(7);
         long? output = reader.IsDBNull(8) ? null : reader.GetInt64(8);
         long? reasoning = reader.IsDBNull(9) ? null : reader.GetInt64(9);
@@ -170,6 +173,7 @@ public static class TokenViewDatabase
         var unknownRelations = reader.IsDBNull(14)
             ? []
             : reader.GetString(14).Split(',', StringSplitOptions.RemoveEmptyEntries);
+        var isEstimated = reader.GetString(15) == "estimated";
         reader.Close();
 
         var (totalMessages, timed, withUsage, estimated) = ReadMessageCounts(connection, id);
@@ -236,7 +240,7 @@ public static class TokenViewDatabase
             started, ended, tokens, input, output, reasoning, cacheRead, cacheWrite,
             basis, coverage, unknownRelations, rows.Count, offset / limit + 1,
             (int)totalMessages, (int)timed, (int)(totalMessages - timed), (int)withUsage,
-            (int)(totalMessages - withUsage), (int)estimated, rows);
+            (int)(totalMessages - withUsage), (int)estimated, rows, isEstimated);
     }
 
     private static (long Total, long Timed, long WithUsage, long Estimated) ReadMessageCounts(
@@ -276,7 +280,7 @@ public static class TokenViewDatabase
         command.CommandText = """
             SELECT s.client, s.client_session_id, COALESCE(s.project_path, '—'),
                    COALESCE(s.model, '—'), s.started_at_ms, s.ended_at_ms,
-                   COALESCE(s.total_tokens, 0), s.message_coverage,
+                   s.total_tokens, s.message_coverage, s.source_kind,
                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)
             FROM sessions s
             WHERE s.started_at_ms >= $from AND s.started_at_ms < $to
@@ -300,13 +304,18 @@ public static class TokenViewDatabase
                     _ => "无明细",
                 };
                 sessions.Add(new SessionRow(key, client.Label, client.ColorHex, reader.GetString(1),
-                    reader.GetString(2), reader.GetString(3), started, reader.GetInt32(8),
-                    reader.GetInt64(6), coverage));
+                    reader.GetString(2), reader.GetString(3), started, reader.GetInt32(9),
+                    reader.IsDBNull(6) ? null : reader.GetInt64(6), coverage,
+                    reader.GetString(8) == "estimated"));
             }
         }
 
-        var totalTokens = sessions.Sum(session => session.Tokens);
-        var byDay = sessions
+        var measuredSessions = sessions.Where(session => !session.IsEstimated).ToList();
+        var totalTokens = measuredSessions.Sum(session => session.Tokens ?? 0);
+        var estimatedTokens = sessions.Where(session => session.IsEstimated)
+            .Sum(session => session.Tokens ?? 0);
+        var measuredSessionsWithoutUsage = measuredSessions.Count(session => session.Tokens is null);
+        var byDay = measuredSessions
             .Where(session => DateTimeOffset.TryParse(session.Started, out _))
             .GroupBy(session => session.Started[..10])
             .OrderBy(group => group.Key)
@@ -321,7 +330,8 @@ public static class TokenViewDatabase
                 var key = day.ToString("yyyy-MM-dd");
                 var group = byDay.FirstOrDefault(entry => entry.Key == key);
                 var count = group?.Count() ?? 0;
-                var tokens = group?.Sum(session => session.Tokens) ?? 0;
+                var known = group?.Count(session => session.Tokens is not null) ?? 0;
+                var tokens = group?.Sum(session => session.Tokens ?? 0) ?? 0;
                 var slices = group is null
                     ? new List<ChartClientSlice>()
                     : group.GroupBy(session => session.ClientKey)
@@ -329,13 +339,15 @@ public static class TokenViewDatabase
                         {
                             var info = Clients.GetValueOrDefault(clientGroup.Key) ??
                                 new ClientInfo(clientGroup.Key, clientGroup.Key, "#6b7280");
+                            var clientKnown = clientGroup.Count(session => session.Tokens is not null);
                             return new ChartClientSlice(clientGroup.Key, info.Label, info.ColorHex,
-                                clientGroup.Sum(session => session.Tokens), clientGroup.Count(), 0);
+                                clientGroup.Sum(session => session.Tokens ?? 0), clientGroup.Count(),
+                                clientGroup.Count() - clientKnown);
                         })
                         .OrderByDescending(slice => slice.Tokens)
                         .ToList();
                 daily.Add(new ChartPoint(new DateTimeOffset(day).ToUnixTimeMilliseconds(),
-                    day.ToString("MM-dd"), tokens, count, count, 0,
+                    day.ToString("MM-dd"), tokens, count, known, count - known,
                     $"{day:yyyy-MM-dd} · 会话开始日", count, slices));
             }
         }
@@ -346,21 +358,41 @@ public static class TokenViewDatabase
             {
                 var client = Clients.GetValueOrDefault(group.Key) ??
                     new ClientInfo(group.Key, group.Key, "#6b7280");
-                var tokens = group.Sum(session => session.Tokens);
+                var measured = group.Where(session => !session.IsEstimated).ToList();
+                var tokens = measured.Sum(session => session.Tokens ?? 0);
+                var unknown = measured.Count(session => session.Tokens is null);
+                var estimated = group.Where(session => session.IsEstimated)
+                    .Sum(session => session.Tokens ?? 0);
                 return new LedgerClientRow(client, group.Count(), tokens,
-                    totalTokens == 0 ? 0 : (double)tokens / totalTokens);
+                    totalTokens == 0 ? 0 : (double)tokens / totalTokens, unknown, estimated);
             })
             .OrderByDescending(row => row.Tokens)
+            .ThenByDescending(row => row.EstimatedTokens)
             .ToList();
 
         var todayStart = StartOfDay(DateTime.Today);
-        var todayTokens = ScalarLong(connection,
-            "SELECT COALESCE(SUM(total_tokens), 0) FROM sessions " +
-            "WHERE started_at_ms >= $from AND started_at_ms < $to AND total_tokens IS NOT NULL",
-            todayStart, to);
+        long todayTokens = 0;
+        int todayRequests = 0, todayRequestsWithoutUsage = 0;
+        using (var todayCommand = connection.CreateCommand())
+        {
+            todayCommand.CommandText = """
+                SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(requests), 0),
+                       COALESCE(SUM(requests_without_usage), 0)
+                FROM request_hourly WHERE hour_ms >= $from AND hour_ms < $to;
+                """;
+            todayCommand.Parameters.AddWithValue("$from", todayStart);
+            todayCommand.Parameters.AddWithValue("$to", to);
+            using var todayReader = todayCommand.ExecuteReader();
+            if (todayReader.Read())
+            {
+                todayTokens = todayReader.GetInt64(0);
+                todayRequests = todayReader.GetInt32(1);
+                todayRequestsWithoutUsage = todayReader.GetInt32(2);
+            }
+        }
         var sessionsWithoutUsage = ScalarLong(connection,
             "SELECT COUNT(*) FROM sessions WHERE started_at_ms >= $from AND started_at_ms < $to " +
-            "AND total_tokens IS NULL", from, to);
+            "AND source_kind <> 'estimated' AND total_tokens IS NULL", from, to);
         var messages = ScalarLong(connection,
             "SELECT COUNT(*) FROM messages m JOIN sessions s ON s.id = m.session_id " +
             "WHERE s.started_at_ms >= $from AND s.started_at_ms < $to", from, to);
@@ -371,6 +403,7 @@ public static class TokenViewDatabase
                 SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_read_tokens), 0)
                 FROM sessions
                 WHERE started_at_ms >= $from AND started_at_ms < $to
+                  AND source_kind <> 'estimated'
                   AND input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL;
                 """;
             cacheCommand.Parameters.AddWithValue("$from", from);
@@ -387,8 +420,10 @@ public static class TokenViewDatabase
             : null;
 
         return new LedgerSnapshot(range.Label, BuildRangeText(from, to, false),
-            sessions.Count, totalTokens, todayTokens, (int)sessionsWithoutUsage,
-            (int)messages, cacheHitBps, daily, clients, sessions);
+            sessions.Count, totalTokens, todayTokens, todayRequests,
+            todayRequestsWithoutUsage, (int)sessionsWithoutUsage,
+            (int)messages, cacheHitBps, daily, clients, sessions,
+            measuredSessions.Count, measuredSessionsWithoutUsage, estimatedTokens);
     }
 
     private static SqliteConnection OpenReadOnly()
@@ -562,7 +597,8 @@ public static class TokenViewDatabase
     }
 
     private static List<ClientUsageRow> ReadClientUsage(SqliteConnection connection, long from,
-        long to, IReadOnlyList<HourRow> hours, long totalTokens)
+        long to, IReadOnlyList<HourRow> hours, long totalTokens,
+        IReadOnlyList<EstimatedUsageRow> estimates)
     {
         using var sessionsCommand = connection.CreateCommand();
         sessionsCommand.CommandText = """
@@ -582,6 +618,11 @@ public static class TokenViewDatabase
             }
         }
 
+        var estimatesByClient = estimates
+            .GroupBy(row => row.Client)
+            .ToDictionary(group => group.Key,
+                group => (Tokens: group.Sum(row => row.Tokens),
+                    Requests: group.Sum(row => row.Requests)));
         var models = ReadClientModels(connection, from, to);
         return hours
             .GroupBy(row => row.Client)
@@ -590,13 +631,41 @@ public static class TokenViewDatabase
                 var client = Clients.GetValueOrDefault(group.Key) ?? new ClientInfo(group.Key, group.Key, "#6b7280");
                 var tokens = group.Sum(row => row.Tokens);
                 var requests = group.Sum(row => row.Requests);
-                return new ClientUsageRow(client, sessions.GetValueOrDefault(group.Key), requests, tokens,
-                    totalTokens == 0 ? 0 : (double)tokens / totalTokens,
-                    models.GetValueOrDefault(group.Key) ?? []);
+                var withoutUsage = group.Sum(row => row.RequestsWithoutUsage);
+                var estimate = estimatesByClient.GetValueOrDefault(group.Key);
+                return new ClientUsageRow(client, sessions.GetValueOrDefault(group.Key), requests,
+                    withoutUsage, tokens, totalTokens == 0 ? 0 : (double)tokens / totalTokens,
+                    models.GetValueOrDefault(group.Key) ?? [], estimate.Tokens, estimate.Requests);
             })
             .OrderByDescending(row => row.Tokens)
+            .ThenByDescending(row => row.EstimatedTokens)
             .ThenByDescending(row => row.Requests)
             .ToList();
+    }
+
+    private sealed record EstimatedUsageRow(string Client, string Model, int Requests, long Tokens);
+
+    private static List<EstimatedUsageRow> ReadEstimatedUsage(SqliteConnection connection,
+        long from, long to)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.client, COALESCE(m.model, s.model, '—'), COUNT(*),
+                   COALESCE(SUM(m.total_tokens), 0)
+            FROM messages m JOIN sessions s ON s.id = m.session_id
+            WHERE m.source_kind = 'estimated' AND m.created_at_ms >= $from AND m.created_at_ms < $to
+            GROUP BY s.client, COALESCE(m.model, s.model, '—');
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+        var rows = new List<EstimatedUsageRow>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new EstimatedUsageRow(reader.GetString(0), reader.GetString(1),
+                reader.GetInt32(2), reader.GetInt64(3)));
+        }
+        return rows;
     }
 
     private static Dictionary<string, List<ClientModelRow>> ReadClientModels(SqliteConnection connection,
@@ -605,7 +674,7 @@ public static class TokenViewDatabase
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT client, COALESCE(model, '—') AS model, SUM(requests) AS requests,
-                   SUM(total_tokens) AS tokens
+                   SUM(total_tokens) AS tokens, SUM(requests_without_usage) AS requests_without_usage
             FROM request_hourly
             WHERE hour_ms >= $from AND hour_ms < $to
             GROUP BY client, COALESCE(model, '—')
@@ -613,7 +682,8 @@ public static class TokenViewDatabase
             """;
         command.Parameters.AddWithValue("$from", from);
         command.Parameters.AddWithValue("$to", to);
-        var grouped = new Dictionary<string, List<(string Name, int Requests, long Tokens)>>();
+        var grouped = new Dictionary<string, List<(string Name, int Requests, long Tokens,
+            int RequestsWithoutUsage)>>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -623,14 +693,14 @@ public static class TokenViewDatabase
                 rows = [];
                 grouped[client] = rows;
             }
-            rows.Add((reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3)));
+            rows.Add((reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetInt32(4)));
         }
         return grouped.ToDictionary(pair => pair.Key, pair =>
         {
             var total = pair.Value.Sum(row => row.Tokens);
             return pair.Value
                 .Select(row => new ClientModelRow(row.Name, row.Requests, row.Tokens,
-                    total == 0 ? 0 : (double)row.Tokens / total))
+                    total == 0 ? 0 : (double)row.Tokens / total, row.RequestsWithoutUsage))
                 .ToList();
         });
     }
@@ -640,26 +710,30 @@ public static class TokenViewDatabase
         var safeColumn = column == "model" ? "model" : "project_path";
         using var command = connection.CreateCommand();
         command.CommandText = $"""
-            SELECT COALESCE({safeColumn}, '—') AS name, COALESCE(SUM(total_tokens), 0) AS tokens
+            SELECT COALESCE({safeColumn}, '—') AS name, COALESCE(SUM(total_tokens), 0) AS tokens,
+                   COUNT(*) AS sessions, COALESCE(SUM(total_tokens IS NULL), 0) AS unknown_sessions
             FROM sessions
             WHERE started_at_ms >= $from AND started_at_ms < $to
+              AND source_kind <> 'estimated'
             GROUP BY COALESCE({safeColumn}, '—')
             ORDER BY tokens DESC
             LIMIT 5;
             """;
         command.Parameters.AddWithValue("$from", from);
         command.Parameters.AddWithValue("$to", to);
-        var values = new List<(string Name, long Tokens)>();
+        var values = new List<(string Name, long Tokens, int Sessions, int UnknownSessions)>();
         using (var reader = command.ExecuteReader())
         {
             while (reader.Read())
             {
-                values.Add((reader.GetString(0), reader.GetInt64(1)));
+                values.Add((reader.GetString(0), reader.GetInt64(1), reader.GetInt32(2),
+                    reader.GetInt32(3)));
             }
         }
         var total = values.Sum(value => value.Tokens);
         return values.Select(value => new RankingRow(value.Name, value.Tokens,
-            total == 0 ? 0 : (double)value.Tokens / total)).ToList();
+            total == 0 ? 0 : (double)value.Tokens / total, value.Sessions,
+            value.UnknownSessions)).ToList();
     }
 
     private static List<SessionRow> ReadRecentSessions(SqliteConnection connection, long from, long to)
@@ -667,8 +741,8 @@ public static class TokenViewDatabase
         using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT s.client, s.client_session_id, COALESCE(s.project_path, '—'),
-                   COALESCE(s.model, '—'), s.started_at_ms, COALESCE(s.total_tokens, 0),
-                   s.message_coverage,
+                   COALESCE(s.model, '—'), s.started_at_ms, s.total_tokens,
+                   s.message_coverage, s.source_kind,
                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)
             FROM sessions s
             WHERE s.started_at_ms >= $from AND s.started_at_ms < $to
@@ -693,8 +767,9 @@ public static class TokenViewDatabase
                 _ => "无明细",
             };
             rows.Add(new SessionRow(key, client.Label, client.ColorHex, reader.GetString(1),
-                reader.GetString(2), reader.GetString(3), started, reader.GetInt32(7),
-                reader.GetInt64(5), coverage));
+                reader.GetString(2), reader.GetString(3), started, reader.GetInt32(8),
+                reader.IsDBNull(5) ? null : reader.GetInt64(5), coverage,
+                reader.GetString(7) == "estimated"));
         }
         return rows;
     }
@@ -743,22 +818,23 @@ public static class TokenViewDatabase
 
     public static string FormatTokens(long value) => TokenFormatting.Format(value);
 
-    public static (long Tokens, int Requests) LoadTodaySummary()
+    public static (long Tokens, int Requests, int RequestsWithoutUsage) LoadTodaySummary()
     {
-        if (!File.Exists(DatabasePath)) return (0, 0);
+        if (!File.Exists(DatabasePath)) return (0, 0, 0);
         var start = new DateTimeOffset(DateTime.Today).ToUnixTimeMilliseconds();
         var end = DateTimeOffset.Now.ToUnixTimeMilliseconds() + 60_000;
         using var connection = OpenReadOnly();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(requests), 0)
+            SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(requests), 0),
+                   COALESCE(SUM(requests_without_usage), 0)
             FROM request_hourly WHERE hour_ms >= $from AND hour_ms < $to;
             """;
         command.Parameters.AddWithValue("$from", start);
         command.Parameters.AddWithValue("$to", end);
         using var reader = command.ExecuteReader();
-        if (!reader.Read()) return (0, 0);
-        return (reader.GetInt64(0), reader.GetInt32(1));
+        if (!reader.Read()) return (0, 0, 0);
+        return (reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2));
     }
 
     public static Dictionary<string, ClientStatsRow> LoadClientStats()
@@ -767,11 +843,15 @@ public static class TokenViewDatabase
         if (!File.Exists(DatabasePath)) return result;
         using var connection = OpenReadOnly();
 
-        var sessions = new Dictionary<string, (long Count, long WithoutUsage, long? Updated)>(StringComparer.Ordinal);
+        var sessions = new Dictionary<string, (long Count, long WithoutUsage, long Estimated,
+            long? Updated)>(StringComparer.Ordinal);
         using (var command = connection.CreateCommand())
         {
             command.CommandText = """
-                SELECT client, COUNT(*), SUM(CASE WHEN total_tokens IS NULL THEN 1 ELSE 0 END),
+                SELECT client, COUNT(*),
+                       SUM(CASE WHEN total_tokens IS NULL AND source_kind <> 'estimated'
+                                THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN source_kind = 'estimated' THEN 1 ELSE 0 END),
                        MAX(updated_at_ms)
                 FROM sessions GROUP BY client;
                 """;
@@ -779,7 +859,7 @@ public static class TokenViewDatabase
             while (reader.Read())
             {
                 sessions[reader.GetString(0)] = (reader.GetInt64(1), reader.GetInt64(2),
-                    reader.IsDBNull(3) ? null : reader.GetInt64(3));
+                    reader.GetInt64(3), reader.IsDBNull(4) ? null : reader.GetInt64(4));
             }
         }
 
@@ -811,7 +891,8 @@ public static class TokenViewDatabase
             var session = sessions.GetValueOrDefault(key);
             var file = files.GetValueOrDefault(key);
             result[key] = new ClientStatsRow(key, session.Count, session.WithoutUsage,
-                messages.GetValueOrDefault(key), file.Count, file.Unparsed, file.Scan);
+                messages.GetValueOrDefault(key), file.Count, file.Unparsed, file.Scan,
+                session.Estimated);
         }
         return result;
     }

@@ -33,7 +33,8 @@ public sealed class RequestLineChart : FrameworkElement
 
     public static readonly DependencyProperty PointsProperty = DependencyProperty.Register(
         nameof(Points), typeof(IReadOnlyList<ChartPoint>), typeof(RequestLineChart),
-        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender,
+            (owner, _) => ((RequestLineChart)owner)._hoverIndex = -1));
 
     public static readonly DependencyProperty MetricProperty = DependencyProperty.Register(
         nameof(Metric), typeof(ChartMetric), typeof(RequestLineChart),
@@ -178,6 +179,12 @@ public sealed class RequestLineChart : FrameworkElement
                 new Point(x - 18, plot.Bottom + 8));
         }
 
+        if (_hoverIndex >= 0 && _hoverIndex < points.Count)
+        {
+            // 日期定位标记与用量值无关，未知用量也能定位，不能画到折线上伪造零值。
+            drawingContext.DrawEllipse(accent, null,
+                new Point(X(plot, _hoverIndex, points.Count), plot.Bottom), 3.5, 3.5);
+        }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -213,7 +220,9 @@ public sealed class RequestLineChart : FrameworkElement
     }
 
     private double? Value(ChartPoint point) => Metric == ChartMetric.Tokens
-        ? point.Tokens
+        ? point.Requests > 0 && point.RequestsWithoutUsage >= point.Requests
+            ? null
+            : point.Tokens
         : point.Requests;
 
     private static double X(Rect plot, int index, int count) =>

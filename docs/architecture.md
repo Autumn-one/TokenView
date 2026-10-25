@@ -93,6 +93,8 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   绕过该判定。
 - **扫描期变化**：读后与提交前复核指纹（或 `SqliteSignature`），变化即抛
   `SyncException.ChangedDuringScan()`（唯一可重试错误），保留历史与水位，等待下次同步。
+  Kimi Code 例外：`wire.jsonl` 是持续追加的账本，读取期间增长只把会话标为 `partial` 并按已读完整行提交，
+  水位保留扫描开始指纹（下次必然重解析），不整客户端中止；详见 `data-metrics.md` 口径 2.18。
 - **原子快照替换**：完整扫描成功后调用 `UsageStore.ReplaceClientSnapshot(client, files, sessions)`，
   在单事务内删除该客户端全部 `sessions` / `messages` / `source_files` 再整体写入，使源数据的
   修正、截断与删除能反映到统计中。部分文件失败时用 `MergeClientSnapshot`（仅 Copilot / DSH）
@@ -235,8 +237,9 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   设置 · 采集诊断与托盘摘要。
 - 展示记录（`Models.cs`）是只读 `record`，携带已格式化的文本属性；Token 单位换算统一走
   `TokenFormatting`（`auto` / `chinese` / `k` / `m` / `b` / `exact`），窗口不手写单位逻辑。
-- 会话累计与请求口径是两条独立查询路径：`request_hourly` 只统计有原生时间且非估算的请求，
-  会话总量仍取 `sessions.total_tokens`；界面不得把两者混成同一个数字。
+- 会话累计与请求口径是两条独立查询路径：`request_hourly` 统计有原生时间的请求计数（含估算请求），
+  但估算请求的 Token 列写 0 并计入 `requests_without_usage`，不进入实测合计；会话总量仍取
+  `sessions.total_tokens`（含 estimated 会话，UI 单列展示），界面不得把两者混成同一个数字。
 - 时间与单位：跨层与库内使用 Unix 毫秒（`UsageTime.NowMs` / `ParseIso8601UtcMs`），
   展示按本地时区；Token 分桶字段名表达单位，缺失显示 `—`。
 - 诊断输出（状态浮层、脱敏诊断摘要）只含版本、客户端、状态、时间与计数，
@@ -308,6 +311,7 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 
 | 日期       | 决策                                                                                    | 状态   | 理由 / 影响                                                                                                              |
 | ---------- | --------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
+| 2026-10-26 | Qoder 记录开关由服务层自动初始化 | 已采纳 | Qoder 采集开启时，在启动与同步前后台设置用户级及进程级 `QODER_EXPOSE_TOKEN_USAGE` / `QODERCN_EXPOSE_TOKEN_USAGE=true`；仅值变化时写入与广播，无弹窗、不重启 Qoder；采集器与 Probe 保持只读。失败保存脱敏诊断，不阻断已有数据采集；无新依赖、管理员权限或网络请求 |
 | 2026-10-20 | 更新改为「自动下载 + SHA-256 校验 + 用户确认重启安装」，发布走 GitHub Actions         | 已采纳 | 仅接受 `Autumn-one/TokenView` 的 HTTPS Release 资产；更新包必须带 `sha256`；独立 PowerShell 助手等待退出后备份、覆盖、重启，失败恢复旧文件；不静默覆盖运行中的程序 |
 | 2026-10-20 | 产品标识、程序集、命名空间与本地存储统一为 TokenView                                      | 已采纳 | 程序集 `TokenView.Wpf`；数据目录 `com.tokenview.app`、库 `tokenview-usage.sqlite3`；首次启动迁移旧版自有文件，失败回退旧布局；GitHub 仓库已迁移到 `Autumn-one/TokenView` |
 | 2026-10-20 | WPF 成为唯一实现                                                                          | 已采纳 | 常驻内存与工作集显著下降、单一技术栈；当时更新只提示并打开下载页，后续由同日自动更新决策取代，发布仅保留 Windows x64 |

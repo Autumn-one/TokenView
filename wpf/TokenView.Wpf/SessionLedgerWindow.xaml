@@ -9,6 +9,7 @@
         FontFamily="Microsoft YaHei UI" UseLayoutRounding="True">
     <Window.Resources>
         <local:HexToBrushConverter x:Key="HexToBrush" />
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
         <Style x:Key="GridHeader" TargetType="DataGridColumnHeader">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="Foreground" Value="{DynamicResource MutedBrush}" />
@@ -103,7 +104,7 @@
                         </Border>
                     </Canvas>
                 </Grid>
-                <TextBlock Grid.Row="2" Text="单位：Token · 按会话开始日"
+                <TextBlock Grid.Row="2" x:Name="NoteText" Text="单位：Token · 按会话开始日"
                            Style="{DynamicResource MutedText}" Margin="0,8,0,0" />
                 <ItemsControl Grid.Row="3" x:Name="ClientList" Margin="0,6,0,10">
                     <ItemsControl.ItemsPanel>
@@ -121,6 +122,9 @@
                                            Foreground="{DynamicResource TextBrush}" />
                                 <TextBlock Text="{Binding TokenText}" FontSize="11"
                                            Foreground="{DynamicResource MutedBrush}" />
+                                <TextBlock Text="{Binding EstimateText}" FontSize="11" Margin="6,0,0,0"
+                                           Foreground="{DynamicResource MutedBrush}"
+                                           Visibility="{Binding HasEstimate, Converter={StaticResource BoolToVisibility}}" />
                             </StackPanel>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>

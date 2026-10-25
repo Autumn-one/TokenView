@@ -60,6 +60,7 @@ public partial class App : Application
         LegacyStorageMigration.TryMigrate();
         System.IO.Directory.CreateDirectory(StoragePaths.Directory);
         var settings = SettingsStore.Load();
+        _ = SyncService.Current.PrepareQoderRecordingAsync(settings.EnabledClients);
         ThemeManager.Apply(settings.Theme);
         if (settings.Theme == AppTheme.System)
         {

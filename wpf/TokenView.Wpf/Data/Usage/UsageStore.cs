@@ -305,6 +305,8 @@ public sealed class UsageStore : IDisposable
         Execute(transaction, "DELETE FROM request_hourly");
         Execute(transaction, "DELETE FROM request_hourly_sessions");
         using (var insert = Command(transaction, $"""
+            -- estimated 请求保留请求数，但 token 列写 0 并计入 requests_without_usage，
+            -- 避免任何估算数字进入实测合计。
             INSERT INTO request_hourly (
                  hour_ms, client, model, project_path, source_kind,
                  requests, requests_with_usage, requests_without_usage,
@@ -316,24 +318,48 @@ public sealed class UsageStore : IDisposable
              SELECT (m.created_at_ms / {HourMs}) * {HourMs} AS hour_ms,
                     s.client, COALESCE(m.model, s.model), s.project_path, m.source_kind,
                     COUNT(*),
-                    COALESCE(SUM(m.total_tokens IS NOT NULL), 0),
-                    COALESCE(SUM(m.total_tokens IS NULL), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.total_tokens IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' OR m.total_tokens IS NULL
+                                      THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(m.source_kind = 'measured'), 0),
                     COALESCE(SUM(m.source_kind = 'derived'), 0),
-                    COALESCE(SUM(m.input_tokens), 0),
-                    COALESCE(SUM(m.output_tokens), 0),
-                    COALESCE(SUM(m.reasoning_tokens), 0),
-                    COALESCE(SUM(m.cache_read_tokens), 0),
-                    COALESCE(SUM(m.cache_write_tokens), 0),
-                    COALESCE(SUM(m.total_tokens), 0),
-                    COALESCE(SUM(CASE WHEN s.client IN ({CacheWriteClients}) THEN m.cache_write_tokens ELSE 0 END), 0),
-                    COALESCE(SUM(m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL), 0),
-                    COALESCE(SUM(CASE WHEN m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL THEN m.input_tokens END), 0),
-                    COALESCE(SUM(CASE WHEN m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL THEN m.cache_read_tokens END), 0),
-                    COUNT(m.input_tokens), COUNT(m.output_tokens), COUNT(m.reasoning_tokens),
-                    COUNT(m.cache_read_tokens), COUNT(m.cache_write_tokens)
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.input_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.output_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.reasoning_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.cache_read_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.cache_write_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      ELSE m.total_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN s.client IN ({CacheWriteClients})
+                                      THEN m.cache_write_tokens ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL
+                                      THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL
+                                      THEN m.input_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.input_tokens IS NOT NULL AND m.cache_read_tokens IS NOT NULL
+                                      THEN m.cache_read_tokens END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.input_tokens IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.output_tokens IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.reasoning_tokens IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.cache_read_tokens IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN m.source_kind = 'estimated' THEN 0
+                                      WHEN m.cache_write_tokens IS NOT NULL THEN 1 ELSE 0 END), 0)
              FROM messages m JOIN sessions s ON s.id = m.session_id
-             WHERE m.source_kind IN ('measured', 'derived') AND m.created_at_ms IS NOT NULL
+             WHERE m.created_at_ms IS NOT NULL
              GROUP BY hour_ms, s.client, COALESCE(m.model, s.model), s.project_path, m.source_kind
             """))
         {
@@ -344,7 +370,7 @@ public sealed class UsageStore : IDisposable
              SELECT DISTINCT m.session_id, (m.created_at_ms / {HourMs}) * {HourMs},
                     s.client, COALESCE(m.model, s.model), s.project_path
              FROM messages m JOIN sessions s ON s.id = m.session_id
-             WHERE m.source_kind IN ('measured', 'derived') AND m.created_at_ms IS NOT NULL
+             WHERE m.created_at_ms IS NOT NULL
             """))
         {
             insert.ExecuteNonQuery();

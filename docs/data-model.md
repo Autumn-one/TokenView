@@ -46,7 +46,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 | Command Code | `command_code.ai_sdk_usage.v1`   | 独立（原始总输入含缓存，换算时扣除）   | 客户端不提供              | 独立、计入                   | 否（四桶求和）                                          |
 | Cline        | `cline.agent_events.v1`          | 独立                                   | 客户端不提供              | 独立、计入                   | 否（四桶求和）                                          |
 | Qoder IDE    | `qoder.ide_chat_message.v1`      | 包含（`cached_tokens` 是 prompt 明细） | 客户端不提供              | 不提供                       | 否（换算后四桶求和）                                    |
-| Qoder CLI    | `qoder.cli_message.v1`           | 独立                                   | 客户端不提供              | 独立、计入                   | 否（四桶求和）                                          |
+| Qoder CLI    | `qoder.cli_message.v1`           | 独立                                   | 客户端不提供              | 独立、计入                   | 否（四桶求和；占位 usage 按 E5 估算）                   |
 | CodeArts     | `codearts.usage.v1`              | 包含（`prompt_tokens` 含 `cached_tokens`） | 包含（`completion_tokens` 含 `reasoning_tokens`） | 不提供                       | 是（`total_tokens` = prompt + completion）               |
 
 由此得到的**互不重叠分桶**（任意两项相加都不会重复计入同一批 token）：
@@ -100,7 +100,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 | Devin        | `sessions.id`                                       | `request_id`                                                  | 同一 `request_id` 的多行 token 四元组完全一致（0 冲突组），只保留一行；组内 token 冲突不静默修正，计 `unparsed` 并标 `partial` |
 | Command Code | transcript header `id`                              | message entry `id`（缺失时 `line:<n>`）                       | 保留所有分支上的 assistant 用量；重复 event id 只计一次，坏行计 `unparsed`                                                     |
 | Cline        | CLI `session_id` / VS Code task id                  | CLI message `id`；VS Code `api_req_started` ts/index          | CLI 与 VS Code 同 id 只保留请求更多的一侧；不把任务标题或正文当统计字段                                                        |
-| Qoder        | IDE `chat_message.session_id` / CLI `sessionId`     | IDE `chat_message.id`（缺失 rowid）；CLI `message.id`         | CLI 同 id 流式重写保留最后一条；跨 IDE/CLI 同会话 id 只保留请求更多的一侧；不读正文                                            |
+| Qoder        | IDE `chat_message.session_id` / CLI `sessionId`     | IDE `chat_message.id`（缺失 rowid）；CLI `message.id`         | CLI 同 id 流式重写保留最后一条；跨 IDE/CLI 同会话 id 只保留请求更多的一侧；正文仅在内存计字符数（E5），不落库            |
 | CodeArts     | `meta.json` `session_id`（缺失时目录名）            | `messages.index.jsonl` 行内 `id`                              | 缺失 id 计 `unparsed` 且不导入；整客户端快照原子替换，重复扫描幂等                                                             |
 
 会话总量的取值依据记录在 `sessions.total_basis`：
@@ -343,9 +343,12 @@ state 支持 version 2 和旧版无版本格式，createdAt / updatedAt 接受 U
 inputOther 已排除缓存；output 不拆分 reasoning；四个 usage 字段均需真实存在才提供规范总量。
 agent 目录决定身份，main 之外标记 sidechain，保留每条请求对应的 wire 来源。
 
-每次来源变化时重建完整客户端快照，state / wire 均登记水位；提交前再次验证目录列表与文件指纹。
-追加、缩短、删除通过原子替换纠正总量；根目录缺失、缺少 state、未知版本、读取失败或截断尾行保留上次快照和水位。
+每次来源变化时重建完整客户端快照，state / wire 均登记水位。
+读取期间继续追加、末行未写完或 wire 头部尚未写完时，本次只提交已读到的完整行并把会话覆盖标为 partial，
+水位保留扫描开始时的指纹，下次同步自动重解析；空 wire 的新会话按 partial、总量未知导入。
+追加、缩短、删除通过原子替换纠正总量；根目录缺失、缺少 state、未知版本、完整首行协议不是 1.4 / 1.5 或读取失败保留上次快照和水位。
 完整非法行 / 未知事件计入 unparsed，并将会话覆盖标为 partial；无 usage 的会话保留未知，不展示为真实零用量。
+不再二次校验目录列表：扫描期间新建的会话留给下次同步。
 目前不支持未验证的 state / wire 协议，客户端成本未提供，不推算费用。
 
 ## 12. MiMoCode / Pi Desktop 采集器
@@ -390,8 +393,10 @@ Pi 提交前复核文件集合/指纹，截断尾行保留上次快照；重复�
 `TokenViewDatabase.LoadSessionDetail(client, clientSessionId, offset, limit)`（会话详情）。
 两者只查询现有 `messages` / `sessions` 表及其派生预聚合，无迁移；返回结构见 `Models.cs`。
 
-预聚合只纳入 `source_kind IN ('measured', 'derived')` 且 `created_at_ms` 非 NULL 的记录，
-按 `(小时, 客户端, COALESCE(messages.model, sessions.model), 项目, source_kind)` 分组，
+预聚合纳入全部有 `created_at_ms` 的记录：`measured` / `derived` 请求照常计入 Token 与 `requests_with_usage`；
+`estimated` 请求（当前仅 Qoder CLI）保留请求数与会话数，但 Token 列、`requests_with_usage` 与缓存列一律写 0，
+并计入 `requests_without_usage`，使估算不污染实测求和。按
+`(小时, 客户端, COALESCE(messages.model, sessions.model), 项目, source_kind)` 分组，
 区间查询再按 `hour_ms >= from AND hour_ms < to` 过滤；口径仍保留客户端 / 项目条件（分组键已含两者），
 当前 WPF 总览入口只按时间范围查询、不附加这两类筛选。
 区间结果返回去重会话数（`COUNT(DISTINCT session_id)`）、请求数、总量已知 / 未知请求数与规范 Token 求和。
@@ -545,18 +550,22 @@ session.totalTokens 是会话client_reported；turnNumber 是轮级去重键。�
 
 与 Pi Desktop 的区别：Pi Desktop 继续读取 `~/.pi-desktop/sessions` 的 schema 1 格式；Pi Agent 是独立的 `pi_agent` 客户端和 v3 格式，二者不互相回退、不合并统计。现有设置保留原启停选择，新增 Pi Agent 需在设置 · 采集手动开启。
 
-## 22. Qoder（口径 2.17，2026-10-19）
+## 22. Qoder（口径 2.17 / 2.19 / 2.20 / 2.21，2026-10-19 / 2026-10-26）
 
-实现：`Data/Collectors/QoderCollector.cs`，口径为 `TokenSemanticsCatalog.QoderIde` / `QoderCli`（`qoder.ide_chat_message.v1` / `qoder.cli_message.v1`）；parser_version 为 1。支持两个来源并合并为同一客户端快照：
+实现：`Data/Collectors/QoderCollector.cs`；IDE 语义 `qoder.ide_chat_message.v1`，CLI 语义 `qoder.cli_message.v2`；parser_version 为 4。两个来源合并为同一客户端快照：
 
-- IDE：`%APPDATA%/Qoder` 与 `%APPDATA%/QoderCN`（macOS 为 `~/Library/Application Support`，Linux 为 `~/.config`）下的 `SharedClientCache/cache/db/local.db`；可用 `QODER_DB` / `QODER_CN_DB` 覆盖。只查询 `chat_session` 的 `session_id/project_uri/project_name/gmt_create/gmt_modified/preferred_model_info` 与 `chat_message` 的 `id/session_id/role/token_info/model_info/gmt_create`，不选择 `content`、`tool_result`、`extra`、记忆或向量表。
-- CLI：`QODER_HOME/projects`、`QODER_CN_HOME/projects`，默认 `~/.qoder/projects`、`~/.qoder-cn/projects`；读取每个项目目录顶层的 `*.jsonl`，不扫描嵌套 `transcript/` 或日志。只反序列化 `type/sessionId/timestamp/uuid/isSidechain/cwd/message.{id,model,usage}`；提示词、回答、工具结果与 `credits` 不读取。
+- IDE：`%APPDATA%/Qoder` / `%APPDATA%/QoderCN` 的 `SharedClientCache/cache/db/local.db`，支持 `QODER_DB` / `QODER_CN_DB` 覆盖。只查询 `chat_session` 身份、时间、项目与模型，以及 `chat_message` 的身份、时间、模型与 `token_info`；不选择正文、工具结果、记忆或向量表。
+- CLI / 新版桌面：`QODER_HOME/projects` / `QODER_CN_HOME/projects`，默认 `~/.qoder/projects` / `~/.qoder-cn/projects`，读取项目目录顶层 JSONL，不扫描嵌套 transcript 或日志。支持 `sessionId` / `session_id`、ISO UTC 或 Unix 毫秒时间。真实计数可用时只消费身份、时间、模型和 usage；仅历史占位估算需要在内存统计输出字符数，正文不持久化。
 
-字段语义：IDE `token_info.prompt_tokens` 是包含 `cached_tokens` 的总输入，归一化为 `input = prompt_tokens − cached_tokens`、`cache_read = cached_tokens`、`output = completion_tokens`，`cache_write`/`reasoning` 未提供（NULL），语义 ID `qoder.ide_chat_message.v1`。CLI `message.usage` 为 Anthropic 形状：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` 四个独立桶，均计入总量，reasoning 未提供，语义 ID `qoder.cli_message.v1`。两者都不提供客户端总量，会话总量按去重请求求和（`sum_of_messages`）。本机 IDE 64 条 assistant 行换算后 input 141 987、cache_read 4 442 233、output 34 385、总量 4 618 605；CLI 102 条 usage 行全部为 0，伴随非零 `credits`，采集器保留原值且不读取 credits。
+自动初始化：Qoder 采集启用时，服务层在 TokenView 启动及每轮同步前，后台将用户级及进程级 `QODER_EXPOSE_TOKEN_USAGE` / `QODERCN_EXPOSE_TOKEN_USAGE` 设置为 `true`，仅变化时写入与广播。无弹窗、不重启 Qoder、不写客户端文件；已运行的 Qoder 在下次正常启动后继承环境。失败保存脱敏诊断，不阻断已有数据读取。Probe 与采集器本身仍只读。
 
-去重与时间：IDE 会话键 `chat_session.session_id`，请求键 `chat_message.id`（缺失时 `rowid:<n>`）；CLI 会话键 `sessionId`（缺失时文件名 stem），请求键 `message.id`（缺失时 `uuid`，再缺失时行号）。CLI 流式重写同一 id 保留最后一条；跨 IDE/CLI 同会话 id 只保留请求更多的一侧（相同偏好 IDE），重复 id 只计一次。IDE 开始取 `gmt_create`，结束取 `gmt_modified` 与最大消息时间的较大值；CLI 时间取 `timestamp`（assistant 行为 ISO 8601 UTC，runtime-config / active-leaf 行为 Unix 毫秒，两种都接受）。模型优先 `model_info.model_key`，回退 `preferred_model_info`；CLI 取 `message.model`。坏 JSON / `token_info` 计 `unparsed` 并使会话 `partial`，无 assistant 用量为 `none`，缺失字段保持未知。
+字段语义：IDE 的 prompt 包含 cached，归一化为 `input = prompt_tokens - cached_tokens`、`cache_read = cached_tokens`、`output = completion_tokens`，cache_write / reasoning 未提供。Qoder 原生 CLI 虽使用 Anthropic 字段名，运行时实际上将上游 `prompt_tokens` 直接写入 `input_tokens`，其中已经包含两个缓存桶；采集器先转换为 `input = input_tokens - cache_read_input_tokens - cache_creation_input_tokens`，随后按互不重叠的四桶归一化，总量为原始 input + output。缓存桶缺失或超过原始输入时，未缓存输入与总量保持未知，不补零、不饱和相减。reasoning 未提供，保持 NULL。
 
-同步：IDE 数据库通过 `SqliteSnapshot` 读取主库 + WAL 的已提交快照；由于 WAL 提交可能不改变主库 mtime，只要存在 IDE 库就强制重新解析，不做“未变化跳过”。CLI 无 IDE 库时仍按文件 size/mtime/parser_version 跳过未变化文件。提交前复核文件列表、指纹与数据库 signature，变化返回 `SyncException.ChangedDuringScan`；缺失根不算错误。复用现有 `sessions` / `messages` 表、请求账本与界面读取结构，不新增 schema、迁移、依赖、权限或联网能力。
+历史兼容：未开启记录开关时运行时主动将 token 字段清零。这些全零 usage 仍按 E5 估算（ratio × 200,000，加输出字符数 ÷ 4）；比率缺失或非法则保持未知。真实非零计数优先，不以 ratio 替换。估算记录保留 `estimated` 且从实测聚合排除；全部为估算的会话仍展示估算总量，同会话混有实测与估算时不生成混合总量，逐请求实测与估算分别保留。已写成零的历史记录不会自动补齐。
+
+去重：CLI 优先 `usage.request_id`，其次条目 `request_id`，再按 message id / uuid / 行号回退；同一请求拆成多个消息块只计一次，实测优先于估算、估算优先于未知，同等级保留最后一条。IDE 请求键仍为 message id（缺失回退 rowid）。跨 IDE / CLI 同会话只保留请求更多的一侧，相同偏好 IDE。无 usage 的 assistant 行忽略，坏 JSON / token_info 计 unparsed，缺失字段保持未知。
+
+同步：IDE 通过 `SqliteSnapshot` 读取已提交主库 + WAL；CLI 按 size / mtime / parser_version 判断重扫。提交前复核来源列表、文件指纹与数据库 signature。parser_version 4 首次同步重算 CLI 分桶和去重，不新增数据库 schema、迁移、依赖、管理员权限或联网能力。
 
 ## 23. CodeArts（口径 2.18，2026-10-20）
 

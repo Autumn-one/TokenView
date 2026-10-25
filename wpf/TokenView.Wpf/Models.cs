@@ -10,6 +10,17 @@ public enum ChartMetric
 
 public sealed record ClientInfo(string Key, string Label, string ColorHex);
 
+internal static class UsageDisplay
+{
+    public static bool IsUnknown(long tokens, int count, int countWithoutUsage) =>
+        tokens == 0 && count > 0 && countWithoutUsage >= count;
+
+    public static string Tokens(long tokens, int count, int countWithoutUsage) =>
+        IsUnknown(tokens, count, countWithoutUsage)
+            ? "—"
+            : TokenViewDatabase.FormatTokens(tokens);
+}
+
 public sealed record ChartClientSlice(
     string ClientKey,
     string Label,
@@ -18,7 +29,7 @@ public sealed record ChartClientSlice(
     int Requests,
     int RequestsWithoutUsage)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
     public string RequestText => Requests.ToString("N0");
 }
 
@@ -28,7 +39,7 @@ public sealed record ChartModelSlice(
     int Requests,
     int RequestsWithoutUsage)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
     public string RequestText => Requests.ToString("N0");
 }
 
@@ -42,26 +53,43 @@ public sealed record ChartPoint(
     string Title,
     int Sessions = 0,
     IReadOnlyList<ChartClientSlice>? Clients = null,
-    IReadOnlyList<ChartModelSlice>? Models = null);
-
-public sealed record ClientModelRow(string Name, int Requests, long Tokens, double Share)
+    IReadOnlyList<ChartModelSlice>? Models = null)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
+}
+
+public sealed record ClientModelRow(string Name, int Requests, long Tokens, double Share,
+    int RequestsWithoutUsage = 0)
+{
+    public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
     public string RequestText => $"{Requests:N0} 条请求";
-    public string ShareText => Share.ToString("P1");
+    public string ShareText => UsageDisplay.IsUnknown(Tokens, Requests, RequestsWithoutUsage)
+        ? "—"
+        : Share.ToString("P1");
 }
 
 public sealed record ClientUsageRow(
     ClientInfo Client,
     int Sessions,
     int Requests,
+    int RequestsWithoutUsage,
     long Tokens,
     double Share,
     IReadOnlyList<ClientModelRow> Models,
+    long EstimatedTokens = 0,
+    int EstimatedRequests = 0,
     bool IsExpanded = false)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
     public string SessionText => $"{Sessions:N0} 个会话 · {Requests:N0} 条请求";
+    public string ShareText => UsageDisplay.IsUnknown(Tokens, Requests, RequestsWithoutUsage)
+        ? "—"
+        : Share.ToString("P1");
+    public bool HasKnownTokens => !UsageDisplay.IsUnknown(Tokens, Requests, RequestsWithoutUsage);
+    public bool HasEstimate => EstimatedTokens > 0;
+    public string EstimateText => HasEstimate
+        ? $"估算 ≈ {TokenViewDatabase.FormatTokens(EstimatedTokens)} · 未计入实测"
+        : "";
     public string ExpandGlyph => IsExpanded ? "▾" : "▸";
 }
 
@@ -74,16 +102,20 @@ public sealed record SessionRow(
     string Model,
     string Started,
     int Requests,
-    long Tokens,
-    string Coverage)
+    long? Tokens,
+    string Coverage,
+    bool IsEstimated = false)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => Tokens is { } value
+        ? (IsEstimated ? "≈ " : "") + TokenViewDatabase.FormatTokens(value)
+        : "—";
     public string RequestsText => Requests.ToString("N0");
 }
 
-public sealed record RankingRow(string Name, long Tokens, double Share)
+public sealed record RankingRow(string Name, long Tokens, double Share,
+    int Sessions = 0, int SessionsWithoutUsage = 0)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => UsageDisplay.Tokens(Tokens, Sessions, SessionsWithoutUsage);
 }
 
 public sealed record SessionMessageRow(
@@ -121,7 +153,7 @@ public sealed record SessionDetailSnapshot(
     string Model,
     string Started,
     string Ended,
-    long Tokens,
+    long? Tokens,
     long? Input,
     long? Output,
     long? Reasoning,
@@ -138,12 +170,23 @@ public sealed record SessionDetailSnapshot(
     int WithUsage,
     int WithoutUsage,
     int Estimated,
-    IReadOnlyList<SessionMessageRow> Messages);
-
-public sealed record LedgerClientRow(ClientInfo Client, int Sessions, long Tokens, double Share)
+    IReadOnlyList<SessionMessageRow> Messages,
+    bool IsEstimated = false)
 {
-    public string TokenText => TokenViewDatabase.FormatTokens(Tokens);
+    public string TokenText => Tokens is { } value
+        ? (IsEstimated ? "≈ " : "") + TokenViewDatabase.FormatTokens(value)
+        : "—";
+}
+
+public sealed record LedgerClientRow(ClientInfo Client, int Sessions, long Tokens, double Share,
+    int SessionsWithoutUsage = 0, long EstimatedTokens = 0)
+{
+    public string TokenText => UsageDisplay.Tokens(Tokens, Sessions, SessionsWithoutUsage);
     public string SessionText => $"{Sessions:N0} 个会话";
+    public bool HasEstimate => EstimatedTokens > 0;
+    public string EstimateText => HasEstimate
+        ? $"估算 ≈ {TokenViewDatabase.FormatTokens(EstimatedTokens)}"
+        : "";
 }
 
 public sealed record LedgerSnapshot(
@@ -152,12 +195,28 @@ public sealed record LedgerSnapshot(
     int Sessions,
     long Tokens,
     long TodayTokens,
+    int TodayRequests,
+    int TodayRequestsWithoutUsage,
     int SessionsWithoutUsage,
     int Messages,
     int? CacheHitBps,
     IReadOnlyList<ChartPoint> Daily,
     IReadOnlyList<LedgerClientRow> Clients,
-    IReadOnlyList<SessionRow> SessionRows);
+    IReadOnlyList<SessionRow> SessionRows,
+    int MeasuredSessions = 0,
+    int MeasuredSessionsWithoutUsage = 0,
+    long EstimatedTokens = 0)
+{
+    public string TokenText => Tokens == 0 && EstimatedTokens > 0 && MeasuredSessions == 0
+        ? "—"
+        : UsageDisplay.Tokens(Tokens, MeasuredSessions, MeasuredSessionsWithoutUsage);
+    public string TodayTokenText =>
+        UsageDisplay.Tokens(TodayTokens, TodayRequests, TodayRequestsWithoutUsage);
+    public bool HasEstimate => EstimatedTokens > 0;
+    public string EstimateText => HasEstimate
+        ? $"估算 ≈ {TokenViewDatabase.FormatTokens(EstimatedTokens)} · 未计入区间合计"
+        : "";
+}
 
 public sealed record DailyStripRow(string Label, string TokenText);
 
@@ -168,7 +227,8 @@ public sealed record ClientStatsRow(
     long Messages,
     long Files,
     long Unparsed,
-    long? LastScanMs);
+    long? LastScanMs,
+    long EstimatedSessions = 0);
 
 public sealed class OverviewSnapshot
 {
@@ -183,6 +243,10 @@ public sealed class OverviewSnapshot
     public int Sessions { get; init; }
     public int SessionsPartial { get; init; }
     public long TotalTokens { get; init; }
+    public long EstimatedTokens { get; init; }
+    public int EstimatedRequests { get; init; }
+    public string TokenText => UsageDisplay.Tokens(TotalTokens, TotalRequests, RequestsWithoutUsage);
+    public bool HasEstimate => EstimatedTokens > 0;
     public IReadOnlyList<ChartPoint> ChartPoints { get; init; } = [];
     public IReadOnlyList<DailyStripRow> DailyStrip { get; init; } = [];
     public IReadOnlyList<ClientUsageRow> Clients { get; init; } = [];

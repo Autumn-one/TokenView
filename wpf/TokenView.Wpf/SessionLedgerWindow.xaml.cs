@@ -17,9 +17,15 @@ public partial class SessionLedgerWindow : Window
             var ledger = TokenViewDatabase.LoadLedger(range);
             RangeText.Text = $"{ledger.RangeLabel} · {ledger.RangeText}";
             SessionsText.Text = ledger.Sessions.ToString("N0");
-            TokensText.Text = TokenViewDatabase.FormatTokens(ledger.Tokens);
-            TodayTokensText.Text = TokenViewDatabase.FormatTokens(ledger.TodayTokens);
+            TokensText.Text = ledger.TokenText;
+            TokensText.ToolTip = ledger.HasEstimate
+                ? "仅统计实测 / 换算会话；估算会话以 ≈ 标注，未计入区间合计"
+                : null;
+            TodayTokensText.Text = ledger.TodayTokenText;
             MessagesText.Text = ledger.Messages.ToString("N0");
+            NoteText.Text = ledger.HasEstimate
+                ? $"单位：Token · 按会话开始日 · 估算会话以 ≈ 标注，未计入区间合计与图表（另有估算 ≈ {TokenViewDatabase.FormatTokens(ledger.EstimatedTokens)}）"
+                : "单位：Token · 按会话开始日";
             CacheHintText.Text = ledger.CacheHitBps is { } bps
                 ? $"缓存命中率 {bps / 100d:0.0}%"
                 : ledger.SessionsWithoutUsage > 0
@@ -60,11 +66,15 @@ public partial class SessionLedgerWindow : Window
         index = Math.Clamp(index, 0, points.Count - 1);
         var point = points[index];
         TooltipTitle.Text = point.Title;
-        TooltipTokens.Text = $"当日会话 Token：{TokenViewDatabase.FormatTokens(point.Tokens)} Token";
+        var unknown = point.Requests > 0 && point.RequestsWithoutUsage >= point.Requests;
+        TooltipTokens.Text = unknown
+            ? "当日会话 Token：—"
+            : $"当日会话 Token：{point.TokenText} Token";
         var exact = point.Tokens.ToString("N0");
         var compact = TokenViewDatabase.FormatTokens(point.Tokens);
-        TooltipExact.Text = compact == exact ? "" : $"精确值：{exact} Token";
-        TooltipExact.Visibility = compact == exact ? Visibility.Collapsed : Visibility.Visible;
+        var showExact = !unknown && compact != exact;
+        TooltipExact.Text = showExact ? $"精确值：{exact} Token" : "";
+        TooltipExact.Visibility = showExact ? Visibility.Visible : Visibility.Collapsed;
         TooltipSessions.Text = $"会话数：{point.Sessions:N0}";
         var slices = (point.Clients ?? [])
             .Where(slice => slice.Tokens > 0)

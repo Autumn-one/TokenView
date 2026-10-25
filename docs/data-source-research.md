@@ -624,15 +624,15 @@ Token 语义验证：全部 9 866 条 usage 记录满足 `totalTokens == input +
 
 与 Pi Desktop 的关系：Pi Desktop 读取 `~/.pi-desktop/sessions` 的 schema 1 格式（`sessionId` / `createdAt` / `meta.usage`）；Pi Agent 是 v3 格式（`id` / `timestamp` / `message.usage`），两者路径和字段不同，不能只改目录名复用。TokenView 将其作为独立客户端 `pi_agent`，不把两者数据相加；图标使用本地内置的通用终端字形（`ClientIconData` 中 `pi_agent` 的终端路径），避免误用代表 Inflection AI 的 LobeHub `Pi` 图标。
 
-## Qoder（IDE / CLI，2026-10-19）
+## Qoder（IDE / CLI，2026-10-26 复核）
 
-本机安装 Qoder CLI 1.1.69 与 Qoder / QoderCN IDE。CLI 会话位于 `~/.qoder/projects/<project-slug>/<session-id>.jsonl`（CN 对应 `~/.qoder-cn/projects`），本机 1 个会话、559 行、218 条 assistant 记录；顶层字段为 `type`、`sessionId`、`timestamp`、`uuid`、`isSidechain`、`cwd`、`message`，`message` 内含 `id/model/usage`。assistant 行的 `timestamp` 是 ISO 8601 UTC 字符串，`runtime-config` / `active-leaf` 行则是 Unix 毫秒整数；解析器两种都接受，非 assistant/usage 行按设计忽略、不计 `unparsed`。`type=assistant` 且带 `message.usage` 的 102 条记录使用 Anthropic 形状 `input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens`；本机 102 条全部为 0，同时 `credits` 非零（合计 11.015），说明 CLI 本地可能不写真实 token、只写额度；采集器保留本地原值，不做估算。
+Qoder 桌面 0.4.11 内嵌 CLI runtime 1.1.75-hotfix.1。运行时的 `EXPOSE_TOKEN_USAGE` 开关默认关闭，输出与日志序列化会主动清零 input / output / cache read / cache creation；国际版环境变量为 `QODER_EXPOSE_TOKEN_USAGE`，CN 为 `QODERCN_EXPOSE_TOKEN_USAGE`，接受 true / 1 / yes。关闭开关时仍保留 credits 与 context_usage_ratio，因此早期“只能估算、上游没有返回计数”的判断被本次代码及新请求对账取代。已有全零历史记录仍按 E5 处理，不能从零恢复真实用量。
 
-同机还有 `%APPDATA%/com.qoder.app.stable/main.sqlite`（Qoder 桌面 UI 投影）：`chat_session_context_usage` 的 `tokenCountsAvailable=false`、`totalTokens=0`，消息 `payload_json` 不含 usage，且会话与 CLI `~/.qoder/projects` 重叠；采集器不读取它，避免重复计数。IDE 数据位于 `%APPDATA%\Qoder\SharedClientCache\cache\db\local.db` 与 `%APPDATA%\QoderCN\SharedClientCache\cache\db\local.db`（macOS/Linux 对应目录）。本机 Qoder 国际版库为空，QoderCN 库有 2 个 `chat_session`、157 条 `chat_message`；其中 64 条 `role=assistant` 且带 `token_info`，形态为 `{"prompt_tokens":22476,"completion_tokens":271,"cached_tokens":0,"max_input_tokens":200000}`，`model_info` 为 `{"model_key":"gm51model"}`，时间列为 Unix 毫秒 `gmt_create`。64 条合计 prompt 4 584 220、cached 4 442 233、completion 34 385；`cached_tokens` 是 `prompt_tokens` 的明细，因此规范化为 input=141 987、cache_read=4 442 233、output=34 385、总量 4 618 605。`chat_message` 的 `content`、`tool_result`、`extra` 与记忆/向量表不读取。
+原生请求解析代码直接将上游 `prompt_tokens` 赋给 `input_tokens`，将 `prompt_tokens_details.cached_tokens` 赋给 `cache_read_input_tokens`，没有先扣除缓存；字段名虽然与 Anthropic 相同，不能据此判断四桶独立。当前采集先扣除两个缓存桶再归一化，并按 request_id 去重。实测记录可用时不再读取输出内容做字符估算。启用开关后的新增 JSONL 已验证出现非零计数；自动化回归只使用合成数据。
 
-Token 语义验证：IDE `prompt_tokens` 包含 `cached_tokens`（本机 64 条中 cached 均不超过 prompt），归一化时必须先扣除以避免重复计数；reasoning 与 cache write 未提供，保持 NULL。CLI 字段是 Anthropic 形状的独立桶，cache read/write 均计入总量；本机全零只能证明字段存在，不能证明非零关系，因此沿用 Anthropic 契约并在文档中标注样本限制。会话总量按去重请求求和，不采用任何客户端总量字段。
+CLI / 新桌面读取 `~/.qoder/projects/<project>/<session>.jsonl` 与 CN 对应目录；新版 `%APPDATA%/com.qoder.app.stable/main.sqlite` 是 UI 投影，与 CLI 同会话重叠，不另采集。旧 IDE 读取 `%APPDATA%/Qoder` / `QoderCN` 的 `SharedClientCache/cache/db/local.db`：`chat_session` 元数据与 `chat_message.token_info/model_info`，不读取 content、tool_result、extra、记忆和向量表。IDE prompt 包含 cached，沿用现有去重叠规则。
 
-去重与完整度：IDE 会话键 `chat_session.session_id`、请求键 `chat_message.id`；CLI 会话键 `sessionId`、请求键 `message.id`（缺失时 `uuid`，再缺失时行号）。CLI 同一 message id 的流式重写保留最后一条（本机 102 个 usage id 均唯一，另有 116 条无 usage 的重写行）；跨 IDE/CLI 同会话 id 只保留请求更多的一侧。坏 JSON / `token_info` 计 `unparsed` 并标 `partial`，无 assistant 用量为 `none`。IDE 库通过 `SqliteSnapshot` 读取主库 + WAL 已提交快照；由于 WAL 提交不一定改变主库 mtime，存在 IDE 库时每次同步都重新解析。提交前复核文件指纹与数据库 signature，变化返回 `ChangedDuringScan`。
+初始化放在服务层而非采集器：Qoder 采集开启时默认静默设置两个用户级环境开关，并通知 Explorer；不重启用户客户端、不写其原始目录、不联网。已运行的客户端需要在下次启动时继承，TokenView 不弹出配置提醒。解析器与 Probe 保持只读；记录来源列表 / 指纹检查与 IDE WAL 快照规则不变。
 
 ## CodeArts（Huawei CodeArts，2026-10-20）
 

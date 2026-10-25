@@ -365,7 +365,10 @@ public partial class SettingsWindow : Window
                 stack.Children.Add(new TextBlock
                 {
                     Text = $"会话 {clientStats.Sessions:N0} · 明细 {clientStats.Messages:N0} · " +
-                           $"已跟踪文件 {clientStats.Files:N0} · 无法解析 {clientStats.Unparsed:N0}",
+                           $"已跟踪文件 {clientStats.Files:N0} · 无法解析 {clientStats.Unparsed:N0}" +
+                           (clientStats.EstimatedSessions > 0
+                               ? $" · 估算 {clientStats.EstimatedSessions:N0}"
+                               : ""),
                     FontSize = 11,
                     Foreground = muted,
                     Margin = new Thickness(0, 5, 0, 0),
@@ -436,7 +439,10 @@ public partial class SettingsWindow : Window
         if (clientStats is not null)
         {
             lines.Add($"会话 {clientStats.Sessions} · 明细 {clientStats.Messages} · " +
-                      $"已跟踪文件 {clientStats.Files} · 无法解析 {clientStats.Unparsed}");
+                      $"已跟踪文件 {clientStats.Files} · 无法解析 {clientStats.Unparsed}" +
+                      (clientStats.EstimatedSessions > 0
+                          ? $" · 估算 {clientStats.EstimatedSessions}"
+                          : ""));
         }
         if (result?.Report is { } report)
         {

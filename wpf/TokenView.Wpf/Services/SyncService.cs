@@ -21,7 +21,14 @@ public sealed class SyncService
     public string? HardError { get; private set; }
     public SyncBatch? LastBatch { get; private set; }
     public Task? CurrentTask { get; private set; }
+    public string? QoderRecordingError { get; private set; }
     public Dictionary<string, ClientSyncResult> LastResults { get; } = new(StringComparer.Ordinal);
+
+    public async Task PrepareQoderRecordingAsync(IReadOnlyCollection<string> clients)
+    {
+        QoderRecordingError = await QoderUsageRecordingService.EnsureEnabledAsync(clients)
+            .ConfigureAwait(false);
+    }
 
     public bool TryStart(IReadOnlyCollection<string> clients, bool force)
     {
@@ -31,10 +38,11 @@ public sealed class SyncService
         HardError = null;
         LastBatch = null;
         var selected = clients.Count == 0 ? Array.Empty<string>() : clients.ToArray();
-        CurrentTask = Task.Run(() =>
+        CurrentTask = Task.Run(async () =>
         {
             try
             {
+                await PrepareQoderRecordingAsync(selected).ConfigureAwait(false);
                 using var store = UsageStore.Open(TokenViewDatabase.DatabasePath);
                 var batch = SyncEngine.Sync(store, new SyncOptions(force), selected,
                     progress => Progress?.Invoke(progress));

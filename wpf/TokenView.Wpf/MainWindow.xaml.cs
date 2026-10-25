@@ -32,9 +32,9 @@ public partial class MainWindow : Window
     private System.Windows.Media.Animation.Storyboard? _announcementSwing;
     private bool _announcementSwinging;
     private readonly DispatcherTimer _skeletonTimer = new() { Interval = TimeSpan.FromMilliseconds(140) };
-    private readonly DispatcherTimer _tooltipHideTimer = new() { Interval = TimeSpan.FromMilliseconds(160) };
     private bool _tooltipByModel;
     private ChartPoint? _hoveredPoint;
+    private ChartPoint? _tooltipPoint;
     private readonly System.Windows.Media.Animation.DoubleAnimation _skeletonPulse = new(0.35, 0.9,
         TimeSpan.FromSeconds(0.85))
     {
@@ -63,14 +63,6 @@ public partial class MainWindow : Window
             LoadingOverlay.Visibility = Visibility.Visible;
             LoadingSkeleton.BeginAnimation(OpacityProperty, _skeletonPulse);
         };
-        _tooltipHideTimer.Tick += (_, _) =>
-        {
-            _tooltipHideTimer.Stop();
-            if (!ChartTooltip.IsMouseOver && !LineChart.IsMouseOver)
-            {
-                ChartTooltip.Visibility = Visibility.Collapsed;
-            }
-        };
         CreateTray();
         Closing += Window_Closing;
         _ready = true;
@@ -80,7 +72,6 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _timer?.Stop();
-            _tooltipHideTimer.Stop();
             SyncService.Current.Progress -= OnSyncProgress;
             SyncService.Current.Completed -= OnSyncCompleted;
             AnnouncementService.Current.Changed -= OnAnnouncementChanged;
@@ -733,14 +724,35 @@ public partial class MainWindow : Window
             _snapshot = snapshot;
 
             RangeDaysText.Text = snapshot.RangeDaysText;
-            TokensValue.Text = TokenViewDatabase.FormatTokens(snapshot.TotalTokens);
+            TokensValue.Text = snapshot.TokenText;
             RequestsValue.Text = snapshot.TotalRequests.ToString("N0");
             SessionsValue.Text = snapshot.Sessions.ToString("N0");
+
+            if (snapshot.HasEstimate)
+            {
+                var clients = snapshot.Clients
+                    .Where(row => row.HasEstimate)
+                    .Select(row => $"{row.Client.Label} ≈ {TokenViewDatabase.FormatTokens(row.EstimatedTokens)}")
+                    .ToList();
+                var detail = clients.Count > 0
+                    ? string.Join(" · ", clients)
+                    : $"合计 ≈ {TokenViewDatabase.FormatTokens(snapshot.EstimatedTokens)}";
+                EstimateNote.Text =
+                    $"估算（{snapshot.EstimatedRequests:N0} 条请求，未计入上方实测）：{detail}";
+                EstimateNote.ToolTip =
+                    "Qoder CLI 占位 usage 的估算：context_usage_ratio × 200,000 + 输出字符数 ÷ 4 · 置信度约 0.8";
+                EstimateNote.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                EstimateNote.Text = "";
+                EstimateNote.Visibility = Visibility.Collapsed;
+            }
 
             var usageNotes = new List<string>();
             if (snapshot.RequestsWithoutUsage > 0)
             {
-                usageNotes.Add($"{(snapshot.RequestsWithUsage > 0 ? "已知子集 · " : "")}{snapshot.RequestsWithoutUsage:N0} 条请求用量未知");
+                usageNotes.Add($"{(snapshot.RequestsWithUsage > 0 ? "已知子集 · " : "")}{snapshot.RequestsWithoutUsage:N0} 条请求无实测用量");
             }
             if (snapshot.SessionsPartial > 0)
             {
@@ -752,6 +764,7 @@ public partial class MainWindow : Window
             UsageTitle.ToolTip = usageTooltip;
             RangeDaysText.ToolTip = usageTooltip;
 
+            HideChartTooltip();
             LineChart.Points = snapshot.ChartPoints;
             ApplyMetric();
             RenderClientUsage();
@@ -782,8 +795,11 @@ public partial class MainWindow : Window
         try
         {
             var today = TokenViewDatabase.LoadTodaySummary();
+            var tokenText = today.Requests > 0 && today.RequestsWithoutUsage >= today.Requests
+                ? "用量未知"
+                : $"{TokenViewDatabase.FormatTokens(today.Tokens)} Token";
             _tray?.SetTooltip(
-                $"TokenView · 今日 {TokenViewDatabase.FormatTokens(today.Tokens)} Token · {today.Requests:N0} 请求");
+                $"TokenView · 今日 {tokenText} · {today.Requests:N0} 请求");
         }
         catch
         {
@@ -793,20 +809,20 @@ public partial class MainWindow : Window
 
     private void LineChart_MouseMove(object sender, MouseEventArgs e)
     {
-        _tooltipHideTimer.Stop();
         var points = LineChart.Points;
         if (points is null || points.Count == 0)
         {
-            ChartTooltip.Visibility = Visibility.Collapsed;
+            HideChartTooltip();
             return;
         }
 
         var position = e.GetPosition(LineChart);
-        var plotWidth = Math.Max(10, LineChart.ActualWidth - 86);
-        var index = points.Count == 1
-            ? 0
-            : (int)Math.Round((position.X - 64) / plotWidth * (points.Count - 1));
-        index = Math.Clamp(index, 0, points.Count - 1);
+        var index = LineChart.HoverIndex;
+        if (index < 0 || index >= points.Count)
+        {
+            HideChartTooltip();
+            return;
+        }
         var point = points[index];
         // 同一个数据点只重建一次 tooltip；鼠标在同一段内移动时仅移动浮层位置。
         if (!ReferenceEquals(_hoveredPoint, point))
@@ -821,7 +837,7 @@ public partial class MainWindow : Window
     {
         TooltipTitle.Text = point.Title;
         var totalLabel = _snapshot?.IsHourly == true ? "所选时段 Token 用量" : "Token 用量";
-        TooltipTokens.Text = $"{totalLabel}：{TokenViewDatabase.FormatTokens(point.Tokens)}";
+        TooltipTokens.Text = $"{totalLabel}：{point.TokenText}";
         TooltipRequests.Text = $"请求数：{point.Requests:N0}";
         TooltipSessions.Text = $"会话数：{point.Sessions:N0}";
         TooltipUnknown.Text = point.RequestsWithoutUsage > 0
@@ -829,6 +845,7 @@ public partial class MainWindow : Window
             : "";
         TooltipUnknown.Visibility = point.RequestsWithoutUsage > 0 ? Visibility.Visible : Visibility.Collapsed;
         RenderTooltipBreakdown(point);
+        _tooltipPoint = point;
         ChartTooltip.Visibility = Visibility.Visible;
     }
 
@@ -894,30 +911,25 @@ public partial class MainWindow : Window
         Canvas.SetTop(ChartTooltip, Math.Max(0, y));
     }
 
-    private void TooltipDimension_Checked(object sender, RoutedEventArgs e)
+    private void ChartBreakdown_Checked(object sender, RoutedEventArgs e)
     {
         if (!_ready || sender is not RadioButton { IsChecked: true })
         {
             return;
         }
-        _tooltipByModel = ReferenceEquals(sender, TooltipModelTab);
-        if (_hoveredPoint is { } point && ChartTooltip.Visibility == Visibility.Visible)
+        _tooltipByModel = ReferenceEquals(sender, ChartModelTab);
+        if (_tooltipPoint is { } point && ChartTooltip.Visibility == Visibility.Visible)
         {
             RenderTooltipBreakdown(point);
+            PositionTooltip(Mouse.GetPosition(LineChart));
         }
     }
 
-    private void ChartTooltip_MouseEnter(object sender, MouseEventArgs e)
+    private void HideChartTooltip()
     {
-        _tooltipHideTimer.Stop();
-    }
-
-    private void ChartTooltip_MouseLeave(object sender, MouseEventArgs e)
-    {
-        if (!LineChart.IsMouseOver)
-        {
-            ChartTooltip.Visibility = Visibility.Collapsed;
-        }
+        ChartTooltip.Visibility = Visibility.Collapsed;
+        _hoveredPoint = null;
+        _tooltipPoint = null;
     }
 
     private sealed record TooltipClientRow(string ClientKey, string Label, string ColorHex,
@@ -927,9 +939,7 @@ public partial class MainWindow : Window
 
     private void LineChart_MouseLeave(object sender, MouseEventArgs e)
     {
-        // 离开后允许下次重新构建 tooltip（同一数据点不应命中缓存）。
-        _hoveredPoint = null;
-        _tooltipHideTimer.Start();
+        HideChartTooltip();
     }
 
     private void ApplyMetric()
@@ -940,7 +950,7 @@ public partial class MainWindow : Window
             DailyStrip.ItemsSource = BuildStrip(_snapshot, _metric);
         }
         UpdateDailyStripWidth();
-        if (_hoveredPoint is { } point && ChartTooltip.Visibility == Visibility.Visible)
+        if (_tooltipPoint is { } point && ChartTooltip.Visibility == Visibility.Visible)
         {
             RenderTooltipBreakdown(point);
         }
@@ -970,7 +980,7 @@ public partial class MainWindow : Window
         return snapshot.ChartPoints.Select(point =>
         {
             var text = metric == ChartMetric.Tokens
-                ? TokenViewDatabase.FormatTokens(point.Tokens)
+                ? point.TokenText
                 : point.Requests.ToString("N0");
             return new DailyStripRow(point.Label, text);
         }).ToList();

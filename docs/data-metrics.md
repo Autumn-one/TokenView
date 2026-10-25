@@ -61,7 +61,7 @@
 | `cache_read_tokens` / `cache_write_tokens` | long?              | 否   | measured | 缓存读写 token，单列统计                                                                                                                                                                                       |
 | `cost_usd`                                 | double?            | 否   | measured | 当前仅保存客户端自报值（OpenCode）；价格换算未实现（落库列 `client_cost_usd`）                                                                                                                                 |
 | `source`                                   | string             | 是   | -        | 该事件整体可信等级（落库列 `source_kind`：`measured` / `derived` / `estimated`）                                                                                                                               |
-| `confidence`                               | double?            | 否   | -        | 估算置信度（0–1），仅 estimated 事件需要；估算规则（第 7 节）未实现，当前不落库                                                                                                                                |
+| `confidence`                               | double?            | 否   | -        | 估算置信度（0–1），仅 estimated 事件需要；当前已用于 Qoder CLI 占位 usage（E5），置信度记录在第 7 节，暂不落库                                                                                                  |
 
 字段可以不落库，但含义与等级必须稳定；新增字段时在本文补一行。
 
@@ -85,7 +85,7 @@
 | 会话数                 | 个    | 选定区间 | measured               | 去重后的 `session_id` 数量                                                                  | 十八客户端采集与查询已实现           |
 | 请求数                 | 次    | 选定区间 | measured               | 事件条数（去重后）                                                                          | 十八客户端采集与查询已实现           |
 | 输入 token             | token | 选定区间 | measured / derived     | 未命中缓存的输入分桶求和（Codex 需扣除 `cache_read`）                                       | 十八客户端采集与查询已实现           |
-| 输出 token             | token | 选定区间 | measured / derived     | 非推理输出分桶求和（Codex / DSH 扣除 `reasoning`）；缺失保持未知，第 7 节估算未实现         | 十八客户端采集与查询已实现           |
+| 输出 token             | token | 选定区间 | measured / derived     | 非推理输出分桶求和（Codex / DSH 扣除 `reasoning`）；缺失保持未知；Qoder CLI 占位 usage 按 E5 估算并单列           | 十八客户端采集与查询已实现           |
 | 缓存 token             | token | 选定区间 | measured               | `cache_read_tokens` / `cache_write_tokens` 独立分桶；`cache_write` 是否计入总量按客户端口径 | 十八客户端采集与查询已实现           |
 | 成本                   | USD   | 选定区间 | measured（客户端自报） | 仅 OpenCode 客户端自报值；TokenView 价格换算未实现（见 `docs/data-model.md` 第 6 节）         | OpenCode 自报值已采集；UI 金额未开放 |
 | 活跃时长               | 小时  | 选定区间 | estimated              | 相邻事件间隔去尾求和（见第 7 节）                                                           | 未实现                               |
@@ -131,10 +131,11 @@
 | E2   | 客户端未记录输入 token | 同上，按提示词字符数估算                        | 0.5          | 未实现                           |
 | E3   | 成本换算               | 价格表单价 × token 数（价格表版本需随结果展示） | -（derived） | 未实现（当前只保存客户端自报值） |
 | E4   | 活跃时长               | 事件间隔 ≤ 30 分钟的相邻事件间隔之和            | 0.7          | 未实现                           |
+| E5   | Qoder CLI assistant 记录的 usage 全为占位 0，且同条带 `context_usage_ratio` | `input = round(ratio × 200 000)`；`output = ceil(输出字符数 ÷ 4)`，字符数取 `content` 字符串、`text` / `thinking` 块与 `tool_use.input` 的原始 JSON 长度；`cache_read` / `cache_write` 置 0 仅为让总量可求和 | 0.8          | 已实现（口径 2.20）              |
 
 约定：
 
-- 估算结果必须携带 `source = estimated` 与 `confidence`。
+- 估算结果必须携带 `source = estimated`；规则置信度记录在本表，暂不落库。
 - 估算公式变更必须更新本表并说明对历史展示的影响。
 - 界面不得自行做估算，估算只在 `Data/Usage/` 的归一化与查询层完成，并随记录返回来源等级。
 
@@ -150,7 +151,7 @@
 
 ## 9. 口径版本与变更
 
-- 本文维护一个口径版本号，格式 `MAJOR.MINOR`，当前为 `2.13`。
+- 本文维护一个口径版本号，格式 `MAJOR.MINOR`，当前为 `2.20`。
 - 破坏性变更（去重规则、token 计入口径、价格表来源、时区处理）升 `MAJOR`；新增指标或字段升 `MINOR`。
 - 每次变更需在提交说明中记录：变更内容、原因、对历史数据展示的影响。
 - 界面展示的统计需与本文版本一致；发布说明中注明本次口径版本。
@@ -414,7 +415,38 @@ Codex parser_version 升到 2，下一次同步自动重读原日志，历史展
 ### 口径 2.17（2026-10-19）：Qoder IDE / CLI 用量
 
 - IDE（`qoder.ide_chat_message.v1`）：只读 `%APPDATA%/Qoder` 与 `%APPDATA%/QoderCN`（macOS/Linux 对应目录）下 `SharedClientCache/cache/db/local.db` 的 `chat_session` / `chat_message` 身份、时间、模型与 `token_info`；`prompt_tokens` 是包含 `cached_tokens` 的总输入，规范化为 `input = prompt_tokens − cached_tokens`，`cache_read = cached_tokens`，`output = completion_tokens`，`cache_write`/`reasoning` 未提供（NULL）。本机 64 条 assistant 行：prompt 4 584 220、cached 4 442 233、completion 34 385，换算后 input 141 987、cache_read 4 442 233、output 34 385、总量 4 618 605。
-- CLI（`qoder.cli_message.v1`）：读取 `QODER_HOME/projects`、`QODER_CN_HOME/projects`（默认 `~/.qoder/projects`、`~/.qoder-cn/projects`）下每个项目目录的 `*.jsonl`；`message.usage` 为 Anthropic 形状，`input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens` 四个独立桶均计入总量，reasoning 未提供。本机 102 条 usage 行全部为 0，且伴随非零 `credits`；这是客户端本地记录的原值，TokenView 不估算、不补零、不读取 `credits`。
+- CLI（`qoder.cli_message.v1`）：读取 `QODER_HOME/projects`、`QODER_CN_HOME/projects`（默认 `~/.qoder/projects`、`~/.qoder-cn/projects`）下每个项目目录的 `*.jsonl`；`message.usage` 为 Anthropic 形状，`input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens` 四个独立桶均计入总量，reasoning 未提供。本机 102 条 usage 行全部为 0，且伴随非零 `credits`；这些 0 是客户端占位符，自口径 2.19 起按未知处理（保留请求、不写 0），TokenView 仍不估算、不读取 `credits`。
 - 会话总量按去重请求求和（`sum_of_messages`）；IDE 会话开始取 `chat_session.gmt_create`，结束取 `gmt_modified` 与最大消息时间的较大值；CLI 时间取条目 `timestamp`。模型优先取消息 `model_info.model_key`，回退 `preferred_model_info`；CLI 取 `message.model`。
 - 去重：IDE `chat_message.id`（缺失时 rowid），CLI `message.id`（缺失时 `uuid`，再缺失时行号）；CLI 流式重写保留最后一条同 id 记录。跨 IDE/CLI 同会话 id 只保留请求更多的一侧（相同偏好 IDE）。坏 JSON/`token_info` 计 `unparsed` 并使会话 `partial`，无 assistant 用量为 `none`。
 - `cache_write_counts_in_total = true`（仅 CLI 可能提供非零值）；无 schema、迁移、权限、依赖或联网变化。不读取 IDE 消息正文、工具结果、记忆内容或 CLI 提示词/回答正文。
+
+### 口径 2.18（2026-10-24）：Kimi Code 并发写入容错
+
+- 背景：`usage.record` 只追加到 `wire.jsonl`，而 Kimi Code 会话在 TokenView 扫描期间持续写入。整客户端快照原先只要任一文件在解析期间增长就抛 `ChangedDuringScan`，本机 2.0 GB / 1021 个 wire 的一轮解析约 90 秒，只要有一个会话活着就几乎必然被打断，导致该客户端长期没有一次成功提交（`kimi_code` 水位停在 2026-10-23 02:52，新会话与 `kimi-code/k3.1-pro` 从未入库）。
+- 新行为：读取期间追加、末行未写完或 wire 头部尚未写完时，本次快照只提交已读到的**完整** `usage.record` 行，会话 `message_coverage = partial`，`source_files` 水位保留扫描开始时的 size / mtime；下次同步因指纹不同必然重解析并补齐。空 wire 的新会话按 `partial` + 总量未知导入，不阻断其它会话。不再二次校验目录列表（扫描期间新建的会话留给下次同步）。
+- 仍保留的拒绝条件：`state.json` 缺失 / 未知 version、wire 首行为**完整**行但协议不是 1.4 / 1.5、目录或文件读取失败；这些保留上次快照与水位，不提交半成品。
+- 口径影响：不估算、不补零、不改变去重键（`agent:<agent>:line:<物理行号>`）与四桶语义；此前因整客户端中止而缺失的 Kimi 会话会在升级后首次成功同步补上，历史 Token 只增不减，可能看到 `partial` 会话。其它客户端口径、schema、迁移、依赖与联网不变。
+
+### 口径 2.19（2026-10-26）：Qoder CLI 全零 usage 视为未知
+
+- 背景：复核本机 Qoder CLI 的 4 个 transcript，带 `message.usage` 的 assistant 记录从 415 条增长到 594 条，`input_tokens/output_tokens/cache_read_input_tokens/cache_creation_input_tokens` 全部为 0（594/594，无一非零），同期 `credits` 非零并带 `context_usage_ratio`；Qoder Desktop 的 `chat_session_context_usage` 同样只有 `tokenCountsAvailable=false`、`totalTokens=0` 与百分比，消息 payload 不含 token 字段。这些 0 是客户端占位符，不是实测零用量。
+- 新行为：assistant 的 usage 对象存在、但所有已提供的 token 字段均为 0 时，保留这条请求（请求数、会话与时间分布照常统计），四个 token 桶与总量按 NULL 写入；parser_version 由 1 升为 2。部分字段非零、实测 0 与缺失字段混合、或整条记录没有任何 token 字段时，保持原有“未知即 NULL、已知零保留 0”的规则；没有 `message.usage` 的 assistant 行仍按设计忽略。
+- 展示：聚合范围内全部请求的用量都未知时，总指标、图表 tooltip、每日条带、会话与排行显示 `—`，不再显示 0；客户端分布中该客户端的 Token、占比同样显示 `—`，占比条隐藏。请求数照常显示，已知 / 未知请求数继续由 `requests_with_usage` / `requests_without_usage` 区分。Qoder IDE 的真实 `token_info` 记录不受影响，仍按口径 2.17 展示。
+- 影响：升级后首次同步会把历史 Qoder CLI 的占位 0 重写为未知，之前显示为 0 的假总量变为 `—`；Qoder IDE 已有的 4 618 605 Token 保持不变。不估算、不读取 `credits`、不用 `context_usage_ratio` 推算 prompt 大小；去重键、schema、依赖与联网不变。
+
+### 口径 2.20（2026-10-26）：Qoder CLI 占位 usage 按 E5 估算
+
+- 背景：口径 2.19 把 Qoder CLI 的全零占位 usage 记为未知后，界面只剩 `—` 与请求数。用户在意的具体 Token 仍可从同一批 transcript 中取得可靠依据：每条带 usage 的 assistant 记录同时带 `usage.context_usage_ratio`（本机 828/828 条，0.1376–0.8352）与完整输出内容；它们是客户端写入的真实字段，只是 token 计数被占位为 0。
+- 新行为（规则 E5）：占位 usage 且 `context_usage_ratio` ∈ (0, 1] 时写入估算值：`input = round(ratio × 200 000)`，`output = ceil(输出字符数 ÷ 4)`，字符数取 `content` 字符串、`text` / `thinking` 块字符串与 `tool_use.input` 的原始 JSON 长度；`cache_read` / `cache_write` 置 0 仅为让总量可求和，不代表客户端提供了实测缓存。比率缺失 / 非法或字符数为 0 时仍按未知处理。请求与全部请求均为估算的会话标 `source_kind = estimated`；`parser_version` 由 2 升为 3，升级后首次同步自动重扫。
+- 置信度依据：7 次 compaction 的 `preTokens` 与本机历史用量对账，估算误差 −0.21% 至 −2.31%（均值 −1.26%）；用同一批 `content` 字符数换算输出量与实际 compaction 输出相差约 0.14%。置信度记为 0.8，仅为估算，不宣称实测精度。
+- 隔离规则：估算值不进入任何实测聚合。请求数、会话数与时间分布照常计入（`request_hourly` 保留这些请求，Token 列与 `requests_with_usage` 记 0，`requests_without_usage` 计数）；总指标、客户端分布、排行、缓存命中率、会话总账与会话详情都把估算与实测分开，估算以 `≈` 与“未计入实测”标注，汇总行 `EstimatedTokens` / `EstimatedRequests` 单独返回。实测与估算绝不相加。
+- 隐私：读取 `content` 只为在内存中累计字符数，正文、工具参数与 `credits` 不落库、不写日志、不外传；IDE 路径不变，仍不读取消息正文。
+- 影响：升级后首次同步会把 Qoder CLI 的未知记录改写为估算记录，界面从 `—` 变为 `≈` 数值；Qoder IDE 的 4 618 605 实测 Token 与所有其他客户端的总量、排行、缓存口径保持不变。去重键、schema、迁移、依赖与联网不变。
+
+
+### 口径 2.21（2026-10-26）：Qoder 自动开启真实记录与缓存去重
+
+- Qoder 采集启用时，由 `QoderUsageRecordingService` 在启动及同步前后台启用用户级与进程级 `QODER_EXPOSE_TOKEN_USAGE` / `QODERCN_EXPOSE_TOKEN_USAGE=true`，仅值变化时写入并广播，无弹窗、不重启 Qoder、不修改客户端文件。初始化失败保留脱敏结果，现有数据仍继续采集；未启用 Qoder 采集时不读写这些环境变量。Probe 与采集器保持只读。
+- 运行时代码证明 token 的全零记录源于默认隐藏开关，并不能说明上游没有计数。真实计数可用时优先采集；Qoder 原生 `input_tokens` 直接来自上游 prompt，包含两个缓存桶，先扣除 cache_read / cache_creation 得到未缓存 input，避免重复累计。CLI 语义升级 `qoder.cli_message.v2`、parser_version 4，首次同步重算；IDE 语义与结果不变。缓存缺失 / 超过输入时总量未知，不伪造零。
+- 请求优先按 usage / 条目 request_id 去重，再回退 message id / uuid / 行号。同请求拆分 / 重放只保留一条，实测优先于估算，估算优先于未知，同等级取最后一条。历史 E5 估算继续单列；同会话跨越开关启用时，估算不能进入实测会话总量，混合总量保持未知，实测请求聚合照常统计。
+- 不新增 schema、依赖、管理员权限、网络或客户端正文持久化。历史已清零记录不自动补齐；新进程继承开关后可记录真实 token。
