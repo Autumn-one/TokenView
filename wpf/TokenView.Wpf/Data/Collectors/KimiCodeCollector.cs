@@ -91,14 +91,6 @@ public sealed class KimiCodeCollector : IClientCollector
             }
         }
 
-        // 文件集合先校验：流式写入期间不再接受新增或删除的会话目录。
-        var currentPaths = CollectorSupport.DiscoverFiles(_root, new SyncReport(),
-            path => SessionDir(path) is not null);
-        if (!currentPaths.SequenceEqual(paths, StringComparer.Ordinal))
-        {
-            throw SyncException.ChangedDuringScan();
-        }
-
         var importedCount = 0;
         ImportSummary imported;
         try
@@ -131,14 +123,15 @@ public sealed class KimiCodeCollector : IClientCollector
                     report.FilesParsed++;
                     report.UnparsedLines += parsed.Unparsed;
                     report.IgnoredLines += parsed.Ignored;
-                    partial |= parsed.Unparsed > 0;
+                    partial |= parsed.Partial || parsed.Unparsed > 0;
                     if (sourceIndex.TryGetValue(wire, out var index))
                     {
-                        // 解析后立即复核指纹：只把稳定文件的内容写进快照。
+                        // 解析后复核指纹：追加写入中的会话只提交已读到的完整行，
+                        // 水位保留扫描开始值，下次同步因指纹不同而重解析。
                         var (size, mtime) = Fingerprint(wire);
                         if (sources[index].SizeBytes != size || sources[index].MtimeMs != mtime)
                         {
-                            throw SyncException.ChangedDuringScan();
+                            partial = true;
                         }
                         sources[index] = sources[index] with { UnparsedRecords = parsed.Unparsed };
                     }
@@ -274,10 +267,11 @@ public sealed class KimiCodeCollector : IClientCollector
                 {
                     document = JsonDocument.Parse(line);
                 }
-                catch (JsonException error)
+                catch (JsonException)
                 {
-                    if (!complete) throw SyncException.FromSource(error);
+                    // 写入中的末行无法解析：只统计完整行，覆盖标 partial。
                     parsed.Unparsed++;
+                    if (!complete) parsed.Partial = true;
                     return;
                 }
 
@@ -293,14 +287,21 @@ public sealed class KimiCodeCollector : IClientCollector
 
                     if (!hasHeader)
                     {
-                        if (!string.Equals(kind, "metadata", StringComparison.Ordinal) ||
-                            !TryReadOptionalString(element, "protocol_version", out var protocol) ||
-                            protocol is not ("1.4" or "1.5"))
+                        if (string.Equals(kind, "metadata", StringComparison.Ordinal) &&
+                            TryReadOptionalString(element, "protocol_version", out var protocol) &&
+                            protocol is "1.4" or "1.5")
                         {
-                            throw InvalidSource();
+                            hasHeader = true;
+                            return;
                         }
-                        hasHeader = true;
-                        return;
+                        if (!complete)
+                        {
+                            // 新会话刚建立，头部行还没写完整，下次同步重解析。
+                            parsed.Unparsed++;
+                            parsed.Partial = true;
+                            return;
+                        }
+                        throw InvalidSource();
                     }
 
                     switch (kind)
@@ -341,7 +342,11 @@ public sealed class KimiCodeCollector : IClientCollector
             throw SyncException.FromSource(error);
         }
 
-        if (!hasHeader) throw InvalidSource();
+        if (!hasHeader)
+        {
+            // 空 wire 或只有未写完的头部：新会话刚建立，按不完整处理。
+            parsed.Partial = true;
+        }
         return parsed;
     }
 
@@ -537,6 +542,7 @@ public sealed class KimiCodeCollector : IClientCollector
     {
         public List<MessageRecord> Messages { get; } = new();
         public List<RawTokenCounts> Counts { get; } = new();
+        public bool Partial { get; set; }
         public int Unparsed { get; set; }
         public int Ignored { get; set; }
     }
