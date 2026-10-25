@@ -85,6 +85,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: TokenView ${{ steps.version.outputs.version }}
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           make_latest: true
           files: |

@@ -61,7 +61,7 @@ https://github.com/Autumn-one/TokenView/releases/latest/download/latest.json
 3. 创建并推送标签：`git tag vX.Y.Z && git push origin vX.Y.Z`。
 4. 等待 Actions 完成，确认 Release 附件包含 zip 与 `latest.json`，并核对 `latest.json` 中的
    `version`、`url`、`sha256`。
-5. 可选：在仓库根目录维护 `RELEASE_NOTES.md`，工作流会把它写入 `latest.json` 的 `notes`。
+5. 在仓库根目录维护 `RELEASE_NOTES.md`，工作流会将它作为 Release 正文，同时写入 `latest.json` 的 `notes`。
 
 工作流使用 GitHub 内置的 `GITHUB_TOKEN`（`permissions: contents: write`），不需要额外 SSH 密钥；
 本地 SSH 只用于推送代码与标签。
