@@ -576,3 +576,67 @@ session.totalTokens 是会话client_reported；turnNumber 是轮级去重键。�
 去重与完整度：会话键 `meta.json.session_id`（缺失时目录名），请求键 `messages.index.jsonl` 行内 `id`（缺失 `id` 计 `unparsed` 且不导入该请求）；坏 JSON 或非法计数计 `unparsed` 并使会话 `partial`，无请求为 `none`。重复扫描幂等，整客户端快照原子替换；提交前复核文件列表与指纹，变化返回 `SyncException.ChangedDuringScan`；缺失根不算错误。
 
 已知偏差：`used_tokens` 缺失时总量由请求求和，但当前 `sessions.total_basis` 仍写 `client_reported`；修正前不把它当作“客户端自报总量”口径使用。
+
+## 24. 局域网多设备聚合（迁移 v4，2026-11-02）
+
+实现：`Data/Peers/` 与 `Services/LanSyncService`。每台 TokenView 只导出本机聚合快照，通过
+UDP 17831 广播发现、TCP 17832（占用时回退）拉取；不读取对端数据库，也不把对端数据写回
+本机 `sessions` / `messages` / `request_hourly`。默认开启，设置中可关闭。
+
+### 快照 schema v1
+
+快照是 GZip JSON，在内存生成并经 TCP 传输；Probe 可写成 `<deviceId>.tokenview.json.gz` 文件。字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `schemaVersion` | 固定 `1`；更高版本拒绝并提示升级 |
+| `deviceId` / `deviceName` | 随机 GUID / 可编辑设备名 |
+| `generatedAtMs` | 导出时刻，用于新旧判断 |
+| `utcOffsetMinutes` / `appVersion` | 时区提示与诊断 |
+| `sessionsPartial` | 全库明细不完整会话数，仅用于提示 |
+| `requestDaily[]` | `(timeMs, client, model, tokens, requests, requestsWithUsage, requestsWithoutUsage, estimatedTokens, estimatedRequests)`，按设备本地日 |
+| `requestHourly[]` | 同上，最近 48 小时，`timeMs` 为 UTC 小时起点 |
+| `sessionDaily[]` | `(timeMs, client, sessions, estimatedSessions)`，按设备本地日 |
+| `sessionHourly[]` | 同上，最近 48 小时 |
+
+- `tokens` 只含 `measured` / `derived`，估算单列；`requests` 与 `requestsWithUsage + requestsWithoutUsage` 一致。
+- 不导出会话正文、项目路径、会话 ID、消息 ID、源文件路径、凭据或费用；模型为空写空串。
+- 所有计数非负、时间在合理范围、主键行不重复；解压上限 256 MiB、压缩上限 32 MiB、行数上限见
+  `PeerSnapshotSerializer`。未知字段忽略，未知新 schema 拒绝。
+- 写入使用内存快照（Probe 导出文件时使用临时文件 + 原子替换），解析失败保留旧数据；
+  `generatedAtMs` 不新于已存值时跳过，
+  手动/强制导入可覆盖。
+
+### peer_* 表
+
+| 表 | 主键 / 用途 |
+| --- | --- |
+| `peer_devices` | `device_id`；名称、快照/导入时间、schema/app 版本、时区、partial 计数 |
+| `peer_request_daily` | `(device_id, day_ms, client, model)`；请求日聚合 |
+| `peer_request_hourly` | `(device_id, hour_ms, client, model)`；最近 48 小时 |
+| `peer_session_daily` | `(device_id, day_ms, client)`；开始的会话数 |
+| `peer_session_hourly` | `(device_id, hour_ms, client)`；最近 48 小时 |
+
+导入在一台设备的单事务内先删旧行（`peer_devices` 级联）再写新快照；失败回滚并保留旧数据。
+`ClearStatistics` 清空 `peer_devices` 与所有 `peer_*`；设备「移除」只删本机导入行。
+导出只读本机 `request_hourly` / `sessions` / `messages`，绝不读 `peer_*`，避免二次转发。
+
+### 查询合并
+
+- `DeviceSelection.Local` 保持原口径；`All` = 本机 + 所有 peer；`Peer` = 指定 peer。
+- peer 请求行映射为 `peer:<deviceId>` 伪客户端，设备名作为客户端显示名，进入
+  `OverviewSnapshot.Clients`、图表客户端切片与客户端分布的模型展开；同设备的原始客户端不再
+  单独显示（用户要求“另一台电脑作为与客户端同级的统计维度”）。
+- Token / 请求 / 估算直接相加；设备之间默认独立，不做跨设备会话去重。
+- 多设备模式 `Sessions` 改为区间/桶内**开始的会话数**（`SessionsStartBased`），本机模式仍为
+  区间内有请求的去重会话；UI 标注「按开始」。
+- 模型排行、项目排行、最近会话、会话总账仍只统计本机（`DetailsLocalOnly`）；peer-only 时为空。
+- 预设范围从本地零点开始，peer 日聚合精确；自定义范围带时分边界时，其他设备按整日计入
+  （`PeerGranularityDaily`），UI 标注“其他设备按日聚合”，不冒充精确值。
+- `all` 范围起点取本机与各 peer 最早数据的最小值；peer 快照离线时保留上次导入数据并显示快照时间。
+
+### 验证
+
+`probe peer-export <db> <out>` 生成快照，`probe peer-import <db> <snapshot>` 导入，
+`probe peer-totals <db> [local] [range]` 查看合并结果，`probe peer-roundtrip <dbA> <dbB> <folder>`
+双向导入并核对合计。测试覆盖快照序列化/校验、伪客户端合并、陈旧快照跳过、回环 UDP/TCP 发现。

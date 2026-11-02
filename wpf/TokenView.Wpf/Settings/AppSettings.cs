@@ -60,6 +60,10 @@ public sealed class AppSettings
     public bool CollectionPaused { get; set; }
     public List<string> EnabledClients { get; set; } = [.. AllClients];
     public bool AutomaticUpdates { get; set; }
+    public bool LanSyncEnabled { get; set; } = true;
+    public string DeviceName { get; set; } =
+        string.IsNullOrWhiteSpace(Environment.MachineName) ? "TokenView" : Environment.MachineName;
+    public string DeviceId { get; set; } = "";
 
     public AppSettings Clone() => new()
     {
@@ -76,5 +80,8 @@ public sealed class AppSettings
         CollectionPaused = CollectionPaused,
         EnabledClients = [.. EnabledClients],
         AutomaticUpdates = AutomaticUpdates,
+        LanSyncEnabled = LanSyncEnabled,
+        DeviceName = DeviceName,
+        DeviceId = DeviceId,
     };
 }

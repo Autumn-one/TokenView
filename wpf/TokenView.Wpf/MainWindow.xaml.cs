@@ -7,6 +7,7 @@ using System.Windows.Threading;
 using TokenView.Wpf.Controls;
 using TokenView.Wpf.Data;
 using TokenView.Wpf.Data.Collectors;
+using TokenView.Wpf.Data.Peers;
 using TokenView.Wpf.Services;
 using TokenView.Wpf.Settings;
 
@@ -18,6 +19,10 @@ public partial class MainWindow : Window
 
     private string _rangeKey = "7d";
     private RangeSelection? _customRange;
+    private string? _deviceTag;
+    private bool _deviceSelectionUserChosen;
+    private string? _deviceSignature;
+    private bool _suppressDeviceChange;
     private ChartMetric _metric = ChartMetric.Tokens;
     private OverviewSnapshot? _snapshot;
     private readonly HashSet<string> _expandedClients = [];
@@ -51,6 +56,9 @@ public partial class MainWindow : Window
         SelectRange();
         SyncService.Current.Progress += OnSyncProgress;
         SyncService.Current.Completed += OnSyncCompleted;
+        LanSyncService.Current.Changed += OnPeerDataChanged;
+        LanSyncService.Current.PeersChanged += OnPeerPresenceChanged;
+        LanSyncService.Current.StatusChanged += OnPeerPresenceChanged;
         RecentSessionsGrid.PreviewKeyDown += RecentSessions_KeyDown;
         RangePicker.RangeConfirmed += RangePicker_RangeConfirmed;
         RangePicker.CancelRequested += RangePicker_CancelRequested;
@@ -74,6 +82,9 @@ public partial class MainWindow : Window
             _timer?.Stop();
             SyncService.Current.Progress -= OnSyncProgress;
             SyncService.Current.Completed -= OnSyncCompleted;
+            LanSyncService.Current.Changed -= OnPeerDataChanged;
+            LanSyncService.Current.PeersChanged -= OnPeerPresenceChanged;
+            LanSyncService.Current.StatusChanged -= OnPeerPresenceChanged;
             AnnouncementService.Current.Changed -= OnAnnouncementChanged;
             _tray?.Dispose();
         };
@@ -209,6 +220,7 @@ public partial class MainWindow : Window
             _ = CheckForUpdatesIfDueAsync();
         };
         _timer.Start();
+        RefreshDeviceSelector();
         await LoadAsync();
         if (_settings.SyncOnStart && !_settings.CollectionPaused)
         {
@@ -347,24 +359,13 @@ public partial class MainWindow : Window
         ApplyMetric();
     }
 
-    private async void Refresh_Click(object sender, RoutedEventArgs e)
-    {
-        _settings = SettingsStore.Load();
-        if (_settings.CollectionPaused)
-        {
-            await LoadAsync();
-            return;
-        }
-        TriggerSync(false);
-    }
-
     private void Announcement_Click(object sender, RoutedEventArgs e)
     {
         new AnnouncementWindow { Owner = this }.ShowDialog();
         UpdateAnnouncementBadge();
     }
 
-    private void About_Click(object sender, RoutedEventArgs e) => _ = OpenSettingsAsync(5);
+    private void About_Click(object sender, RoutedEventArgs e) => _ = OpenSettingsAsync(6);
 
     private void OnAnnouncementChanged()
     {
@@ -402,7 +403,19 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StatusText_Click(object sender, MouseButtonEventArgs e)
+    private async void StatusText_Sync(object sender, MouseButtonEventArgs e)
+    {
+        _settings = SettingsStore.Load();
+        _ = LanSyncService.Current.RefreshNowAsync();
+        if (_settings.CollectionPaused)
+        {
+            await LoadAsync();
+            return;
+        }
+        TriggerSync(false);
+    }
+
+    private void StatusText_ContextMenu(object sender, MouseButtonEventArgs e)
     {
         var service = SyncService.Current;
         var menu = new ContextMenu
@@ -446,7 +459,7 @@ public partial class MainWindow : Window
         open.Click += (_, _) => Settings_Click(this, new RoutedEventArgs());
         menu.Items.Add(new Separator());
         menu.Items.Add(open);
-        menu.PlacementTarget = StatusText;
+        menu.PlacementTarget = StatusCluster;
         menu.IsOpen = true;
     }
 
@@ -456,6 +469,8 @@ public partial class MainWindow : Window
     {
         new SettingsWindow(section) { Owner = this }.ShowDialog();
         _settings = SettingsStore.Load();
+        LanSyncService.Current.ApplySettings(_settings);
+        RefreshDeviceSelector();
         ApplySyncStatus();
         await LoadAsync();
     }
@@ -534,26 +549,25 @@ public partial class MainWindow : Window
     private void ApplySyncStatus()
     {
         var service = SyncService.Current;
-        RefreshButton.IsEnabled = !_settings.CollectionPaused && !service.IsRunning;
         if (service.IsRunning)
         {
             StatusText.Text = "同步中";
             StatusDot.Fill = (Brush)FindResource("MutedBrush");
-            StatusText.ToolTip = "正在读取本机客户端数据";
+            StatusCluster.ToolTip = "正在读取本机客户端数据 · 点击立即同步";
             return;
         }
         if (_settings.CollectionPaused)
         {
             StatusText.Text = "已暂停";
             StatusDot.Fill = (Brush)FindResource("MutedBrush");
-            StatusText.ToolTip = "采集已暂停，恢复后继续读取本机数据";
+            StatusCluster.ToolTip = "采集已暂停，恢复后继续读取本机数据 · 点击立即同步";
             return;
         }
         if (service.HardError is not null)
         {
             StatusText.Text = "同步异常";
             StatusDot.Fill = Brushes.IndianRed;
-            StatusText.ToolTip = service.HardError;
+            StatusCluster.ToolTip = service.HardError + " · 点击立即同步";
             return;
         }
         StatusText.Text = "已同步";
@@ -576,7 +590,8 @@ public partial class MainWindow : Window
                 parts.Add($"{string.Join("、", retryable)} 正在写入，下次同步自动重试");
             }
         }
-        StatusText.ToolTip = parts.Count == 0 ? "尚未同步" : string.Join(" · ", parts);
+        var detail = parts.Count == 0 ? "尚未同步" : string.Join(" · ", parts);
+        StatusCluster.ToolTip = detail + " · 点击立即同步";
     }
 
     private void Ledger_Click(object sender, RoutedEventArgs e)
@@ -684,7 +699,7 @@ public partial class MainWindow : Window
     private bool _reloadPending;
 
     /// <summary>加载期间再次触发（切换区间 / 同步完成 / 设置返回）合并为一次，结束后重跑。</summary>
-    private async Task LoadAsync()
+    private async Task LoadAsync(bool silent = false)
     {
         if (_loading)
         {
@@ -697,7 +712,7 @@ public partial class MainWindow : Window
             do
             {
                 _reloadPending = false;
-                await LoadOnceAsync();
+                await LoadOnceAsync(silent);
             }
             while (_reloadPending);
         }
@@ -707,26 +722,33 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadOnceAsync()
+    private async Task LoadOnceAsync(bool silent = false)
     {
-        RefreshButton.IsEnabled = false;
-        _skeletonTimer.Stop();
-        _skeletonTimer.Start();
-        if (!SyncService.Current.IsRunning)
+        if (!silent)
         {
-            StatusText.Text = "读取中…";
-            StatusDot.Fill = (Brush)FindResource("MutedBrush");
+            _skeletonTimer.Stop();
+            _skeletonTimer.Start();
+            if (!SyncService.Current.IsRunning)
+            {
+                StatusText.Text = "读取中…";
+                StatusDot.Fill = (Brush)FindResource("MutedBrush");
+            }
         }
         try
         {
             var range = CurrentRange();
-            var snapshot = await Task.Run(() => TokenViewDatabase.Load(range));
+            var selection = CurrentDeviceSelection();
+            var snapshot = await Task.Run(() => TokenViewDatabase.Load(range, selection));
             _snapshot = snapshot;
 
             RangeDaysText.Text = snapshot.RangeDaysText;
             TokensValue.Text = snapshot.TokenText;
             RequestsValue.Text = snapshot.TotalRequests.ToString("N0");
             SessionsValue.Text = snapshot.Sessions.ToString("N0");
+            SessionsLabel.Text = snapshot.SessionsStartBased ? "会话数（按开始）" : "会话数";
+            SessionsLabel.ToolTip = snapshot.SessionsStartBased
+                ? "多设备合计按各设备会话开始时间统计；切到本机查看原有口径。"
+                : "区间内有请求的去重会话数。";
 
             if (snapshot.HasEstimate)
             {
@@ -758,9 +780,19 @@ public partial class MainWindow : Window
             {
                 usageNotes.Add($"{snapshot.SessionsPartial:N0} 个会话明细不完整");
             }
+            var scopeNote = snapshot.Scope switch
+            {
+                DeviceScope.All => " · 多设备合计",
+                DeviceScope.Peer => " · 单台其他设备",
+                _ => "",
+            };
+            if (snapshot.SessionsStartBased)
+            {
+                scopeNote += " · 会话数按开始时间";
+            }
             var usageTooltip = usageNotes.Count > 0
-                ? $"{snapshot.RangeText}\n{string.Join(" · ", usageNotes)}"
-                : snapshot.RangeText;
+                ? $"{snapshot.RangeText}{scopeNote}\n{string.Join(" · ", usageNotes)}"
+                : $"{snapshot.RangeText}{scopeNote}";
             UsageTitle.ToolTip = usageTooltip;
             RangeDaysText.ToolTip = usageTooltip;
 
@@ -771,6 +803,7 @@ public partial class MainWindow : Window
             ModelRanking.ItemsSource = snapshot.Models;
             ProjectRanking.ItemsSource = snapshot.Projects;
             RecentSessionsGrid.ItemsSource = snapshot.RecentSessions;
+            UpdatePeerViewHints(snapshot);
 
             ApplySyncStatus();
             UpdateTrayTooltip();
@@ -779,14 +812,19 @@ public partial class MainWindow : Window
         {
             StatusText.Text = "读取失败";
             StatusDot.Fill = Brushes.IndianRed;
-            MessageBox.Show(this, error.Message, "TokenView", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (!silent)
+            {
+                MessageBox.Show(this, error.Message, "TokenView", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
         finally
         {
             _skeletonTimer.Stop();
-            LoadingSkeleton.BeginAnimation(OpacityProperty, null);
-            LoadingOverlay.Visibility = Visibility.Collapsed;
-            RefreshButton.IsEnabled = !_settings.CollectionPaused && !SyncService.Current.IsRunning;
+            if (!silent)
+            {
+                LoadingSkeleton.BeginAnimation(OpacityProperty, null);
+                LoadingOverlay.Visibility = Visibility.Collapsed;
+            }
         }
     }
 
@@ -804,6 +842,162 @@ public partial class MainWindow : Window
         catch
         {
             _tray?.SetTooltip("TokenView");
+        }
+    }
+
+    private DeviceSelection CurrentDeviceSelection()
+    {
+        if (!_settings.LanSyncEnabled)
+        {
+            return DeviceSelection.Local;
+        }
+        return _deviceTag switch
+        {
+            "all" => DeviceSelection.All,
+            "local" or null => DeviceSelection.Local,
+            var id when Guid.TryParse(id, out _) => DeviceSelection.Peer(id),
+            _ => DeviceSelection.Local,
+        };
+    }
+
+    private void RefreshDeviceSelector()
+    {
+        if (DeviceFilterBox is null)
+        {
+            return;
+        }
+        var status = LanSyncService.Current.Status;
+        IReadOnlyList<LanPeerStatus> peers = _settings.LanSyncEnabled
+            ? status.Peers
+            : Array.Empty<LanPeerStatus>();
+        var signature = string.Join("|", peers.Select(peer =>
+            $"{peer.DeviceId}:{peer.DeviceName}:{peer.LastSnapshotAtMs is null}"));
+        if (string.Equals(signature, _deviceSignature, StringComparison.Ordinal) &&
+            DeviceFilterBox.Items.Count > 0)
+        {
+            return;
+        }
+        _deviceSignature = signature;
+        _suppressDeviceChange = true;
+        try
+        {
+            DeviceFilterBox.Items.Clear();
+            if (peers.Count == 0)
+            {
+                DeviceFilterBox.Visibility = Visibility.Collapsed;
+                _deviceTag = "local";
+                return;
+            }
+            DeviceFilterBox.Visibility = Visibility.Visible;
+            DeviceFilterBox.Items.Add(new ComboBoxItem { Content = "全部设备", Tag = "all" });
+            DeviceFilterBox.Items.Add(new ComboBoxItem { Content = "本机", Tag = "local" });
+            foreach (var peer in peers)
+            {
+                var label = peer.DeviceName;
+                if (peer.LastSnapshotAtMs is null)
+                {
+                    label += "（等待同步）";
+                }
+                DeviceFilterBox.Items.Add(new ComboBoxItem { Content = label, Tag = peer.DeviceId });
+            }
+            var selected = _deviceSelectionUserChosen ? _deviceTag : "all";
+            if (selected is null)
+            {
+                selected = "all";
+            }
+            if (selected != "all" && selected != "local" &&
+                peers.All(peer => !string.Equals(peer.DeviceId, selected, StringComparison.Ordinal)))
+            {
+                selected = "all";
+            }
+            foreach (var item in DeviceFilterBox.Items.OfType<ComboBoxItem>())
+            {
+                if (string.Equals(item.Tag as string, selected, StringComparison.Ordinal))
+                {
+                    DeviceFilterBox.SelectedItem = item;
+                    break;
+                }
+            }
+            _deviceTag = selected;
+        }
+        finally
+        {
+            _suppressDeviceChange = false;
+        }
+    }
+
+    private async void DeviceFilter_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressDeviceChange || !_ready)
+        {
+            return;
+        }
+        if (DeviceFilterBox.SelectedItem is not ComboBoxItem { Tag: string tag })
+        {
+            return;
+        }
+        if (string.Equals(tag, _deviceTag, StringComparison.Ordinal))
+        {
+            return;
+        }
+        _deviceTag = tag;
+        _deviceSelectionUserChosen = true;
+        await LoadAsync();
+    }
+
+    private void UpdatePeerViewHints(OverviewSnapshot snapshot)
+    {
+        var peerOnly = snapshot.Scope == DeviceScope.Peer;
+        SessionViewNote.Text = peerOnly
+            ? "其他设备只提供聚合用量，不提供项目与会话明细。"
+            : snapshot.DetailsLocalOnly
+                ? "会话视角仅统计本机；上方请求用量含其他设备。"
+                : "按会话开始日筛选，展示整段会话累计；与上方按请求时间的总量不可直接对账。";
+        if (snapshot.PeerGranularityDaily)
+        {
+            SessionViewNote.Text += " 其他设备按日聚合，自定义范围的边界日按整日计入。";
+        }
+        LedgerButton.Content = snapshot.DetailsLocalOnly ? "查看本机会话总账" : "查看会话总账";
+        LedgerButton.Visibility = peerOnly ? Visibility.Collapsed : Visibility.Visible;
+        NoModels.Visibility = peerOnly && snapshot.Models.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        NoProjects.Visibility = peerOnly && snapshot.Projects.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        NoRecentSessions.Visibility = peerOnly && snapshot.RecentSessions.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void OnPeerDataChanged()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(OnPeerDataChanged));
+            return;
+        }
+        if (CurrentDeviceSelection().Scope == DeviceScope.Local)
+        {
+            RefreshDeviceSelector();
+            return;
+        }
+        _ = LoadAsync(silent: true);
+    }
+
+    private void OnPeerPresenceChanged()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(OnPeerPresenceChanged));
+            return;
+        }
+        var before = CurrentDeviceSelection();
+        RefreshDeviceSelector();
+        var after = CurrentDeviceSelection();
+        if (!Equals(before, after))
+        {
+            _ = LoadAsync(silent: true);
         }
     }
 
@@ -839,7 +1033,8 @@ public partial class MainWindow : Window
         var totalLabel = _snapshot?.IsHourly == true ? "所选时段 Token 用量" : "Token 用量";
         TooltipTokens.Text = $"{totalLabel}：{point.TokenText}";
         TooltipRequests.Text = $"请求数：{point.Requests:N0}";
-        TooltipSessions.Text = $"会话数：{point.Sessions:N0}";
+        var sessionSuffix = _snapshot?.SessionsStartBased == true ? "（按开始）" : "";
+        TooltipSessions.Text = $"会话数{sessionSuffix}：{point.Sessions:N0}";
         TooltipUnknown.Text = point.RequestsWithoutUsage > 0
             ? $"用量未知：{point.RequestsWithoutUsage:N0} 条"
             : "";

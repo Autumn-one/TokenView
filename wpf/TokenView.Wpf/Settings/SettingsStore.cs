@@ -54,10 +54,18 @@ public static class SettingsStore
         lock (WriteGate)
         {
             var existing = ReadDocument();
+            var normalized = Normalize(settings);
+            if (!Guid.TryParse(normalized.DeviceId, out _) &&
+                existing is not null &&
+                Guid.TryParse(existing.Settings.DeviceId, out _))
+            {
+                // 主题等即时保存可能发生在设备身份生成之前；不要把已有 ID 覆盖成空。
+                normalized.DeviceId = existing.Settings.DeviceId;
+            }
             var document = new Document
             {
                 SchemaVersion = 1,
-                Settings = Normalize(settings),
+                Settings = normalized,
                 LastUpdateCheckMs = existing?.LastUpdateCheckMs,
                 LastReadAnnouncementHash = existing?.LastReadAnnouncementHash,
             };
@@ -140,6 +148,24 @@ public static class SettingsStore
             .Where(AppSettings.AllClients.Contains)
             .Distinct()
             .ToList();
+        normalized.DeviceName = NormalizeDeviceName(normalized.DeviceName);
+        if (!string.IsNullOrWhiteSpace(normalized.DeviceId) &&
+            !Guid.TryParse(normalized.DeviceId, out _))
+        {
+            normalized.DeviceId = "";
+        }
         return normalized;
+    }
+
+    private static string NormalizeDeviceName(string? value)
+    {
+        var cleaned = new string((value ?? "").Where(ch => !char.IsControl(ch)).ToArray()).Trim();
+        if (cleaned.Length == 0)
+        {
+            cleaned = string.IsNullOrWhiteSpace(Environment.MachineName)
+                ? "TokenView"
+                : Environment.MachineName;
+        }
+        return cleaned.Length <= 64 ? cleaned : cleaned[..64];
     }
 }

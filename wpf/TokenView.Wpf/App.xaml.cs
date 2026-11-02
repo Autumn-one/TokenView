@@ -60,6 +60,11 @@ public partial class App : Application
         LegacyStorageMigration.TryMigrate();
         System.IO.Directory.CreateDirectory(StoragePaths.Directory);
         var settings = SettingsStore.Load();
+        if (settings.LanSyncEnabled)
+        {
+            DeviceIdentity.Ensure(settings);
+            LanSyncService.Current.Start(LanSyncService.OptionsFrom(settings));
+        }
         _ = SyncService.Current.PrepareQoderRecordingAsync(settings.EnabledClients);
         ThemeManager.Apply(settings.Theme);
         if (settings.Theme == AppTheme.System)
@@ -124,6 +129,7 @@ public partial class App : Application
         {
             await Task.WhenAny(running, Task.Delay(TimeSpan.FromSeconds(30)));
         }
+        LanSyncService.Current.Stop();
         if (MainWindow is MainWindow window && window.IsLoaded)
         {
             window.ForceCloseForExit();

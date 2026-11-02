@@ -1,4 +1,5 @@
 using TokenView.Wpf.Data;
+using TokenView.Wpf.Data.Peers;
 
 namespace TokenView.Wpf;
 
@@ -31,6 +32,9 @@ public sealed record ChartClientSlice(
 {
     public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
     public string RequestText => Requests.ToString("N0");
+    public string IconKey => ClientKey.StartsWith(TokenViewDatabase.PeerClientPrefix, StringComparison.Ordinal)
+        ? "device"
+        : ClientKey;
 }
 
 public sealed record ChartModelSlice(
@@ -78,13 +82,19 @@ public sealed record ClientUsageRow(
     IReadOnlyList<ClientModelRow> Models,
     long EstimatedTokens = 0,
     int EstimatedRequests = 0,
-    bool IsExpanded = false)
+    bool IsExpanded = false,
+    bool SessionsStartBased = false)
 {
     public string TokenText => UsageDisplay.Tokens(Tokens, Requests, RequestsWithoutUsage);
-    public string SessionText => $"{Sessions:N0} 个会话 · {Requests:N0} 条请求";
+    public string SessionText => SessionsStartBased
+        ? $"{Sessions:N0} 个会话（按开始） · {Requests:N0} 条请求"
+        : $"{Sessions:N0} 个会话 · {Requests:N0} 条请求";
     public string ShareText => UsageDisplay.IsUnknown(Tokens, Requests, RequestsWithoutUsage)
         ? "—"
         : Share.ToString("P1");
+    public string IconKey => Client.Key.StartsWith(TokenViewDatabase.PeerClientPrefix, StringComparison.Ordinal)
+        ? "device"
+        : Client.Key;
     public bool HasKnownTokens => !UsageDisplay.IsUnknown(Tokens, Requests, RequestsWithoutUsage);
     public bool HasEstimate => EstimatedTokens > 0;
     public string EstimateText => HasEstimate
@@ -253,4 +263,8 @@ public sealed class OverviewSnapshot
     public IReadOnlyList<RankingRow> Models { get; init; } = [];
     public IReadOnlyList<RankingRow> Projects { get; init; } = [];
     public IReadOnlyList<SessionRow> RecentSessions { get; init; } = [];
+    public DeviceScope Scope { get; init; } = DeviceScope.Local;
+    public bool SessionsStartBased { get; init; }
+    public bool DetailsLocalOnly { get; init; }
+    public bool PeerGranularityDaily { get; init; }
 }

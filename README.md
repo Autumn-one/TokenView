@@ -28,6 +28,9 @@ itself: everything stays local, with no telemetry and no uploads.
   Qoder, and CodeArts.
 - Explicit separation of measured, derived, estimated, unknown, and partial data.
 - Local data clearing, configurable source collection, and statistics/settings storage relocation.
+- LAN multi-device: automatically discovers other TokenView instances on the same private network and
+  shows each computer as a device-level dimension alongside clients; only aggregate usage is exchanged,
+  on by default and switchable off.
 - Dark and light themes, tray integration, autostart, and configurable sync schedules.
 - Update checks against the fixed GitHub Releases `latest.json` endpoint, with optional daily
   automatic download and SHA-256-verified restart installation.

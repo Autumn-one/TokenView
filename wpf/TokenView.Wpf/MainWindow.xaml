@@ -82,24 +82,17 @@
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
                         HorizontalAlignment="Right">
-                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource AccentBrush}"
-                         VerticalAlignment="Center" Margin="0,0,7,0" />
-                <TextBlock x:Name="StatusText" Text="已同步" Style="{DynamicResource MutedText}"
-                           Width="140" VerticalAlignment="Center" Margin="0,0,10,0"
-                           TextTrimming="CharacterEllipsis"
-                           MouseLeftButtonUp="StatusText_Click" />
-                <Button x:Name="RefreshButton" Style="{DynamicResource IconButton}" Click="Refresh_Click"
-                        ToolTip="刷新数据">
-                    <Viewbox Width="17" Height="17">
-                        <Canvas Width="24" Height="24">
-                            <Path Data="M23,4 V10 H17 M20.49,15 A9,9 0 1,1 18.37,5.64 L23,10"
-                                  Stroke="{DynamicResource MutedBrush}" StrokeThickness="1.8"
-                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                  StrokeLineJoin="Round" />
-                        </Canvas>
-                    </Viewbox>
-                </Button>
-                <Grid Margin="4,0,0,0">
+                <StackPanel x:Name="StatusCluster" Orientation="Horizontal" VerticalAlignment="Center"
+                            Margin="0,0,8,0" Cursor="Hand" Background="Transparent"
+                            MouseLeftButtonUp="StatusText_Sync"
+                            MouseRightButtonUp="StatusText_ContextMenu"
+                            ToolTip="点击立即同步；右键查看同步详情">
+                    <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource AccentBrush}"
+                             VerticalAlignment="Center" Margin="0,0,7,0" />
+                    <TextBlock x:Name="StatusText" Text="已同步" Style="{DynamicResource MutedText}"
+                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <Grid Margin="0,0,0,0">
                     <Button x:Name="AnnouncementButton" Style="{DynamicResource IconButton}"
                             Click="Announcement_Click" ToolTip="公告"
                             AutomationProperties.Name="公告">
@@ -161,10 +154,18 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock x:Name="UsageTitle" Text="请求用量" Style="{DynamicResource CardTitle}"
                                        VerticalAlignment="Center" />
-                            <TextBlock x:Name="RangeDaysText" Grid.Column="1"
-                                       Style="{DynamicResource MutedText}"
-                                       Margin="8,0,12,0" VerticalAlignment="Center"
-                                       TextTrimming="CharacterEllipsis" />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                        Margin="8,0,12,0" VerticalAlignment="Center">
+                                <ComboBox x:Name="DeviceFilterBox" Width="150" FontSize="12"
+                                          Margin="0,0,10,0" Visibility="Collapsed"
+                                          SelectionChanged="DeviceFilter_Changed"
+                                          AutomationProperties.Name="统计设备范围"
+                                          ToolTip="选择本机、全部设备或某台局域网设备" />
+                                <TextBlock x:Name="RangeDaysText"
+                                           Style="{DynamicResource MutedText}"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
                             <StackPanel Grid.Column="2" Orientation="Horizontal"
                                         HorizontalAlignment="Right" VerticalAlignment="Center">
                                 <RadioButton x:Name="MetricTokens" Content="Token" GroupName="Metric" IsChecked="True"
@@ -209,7 +210,8 @@
                                 <TextBlock x:Name="RequestsValue" Text="—" Style="{DynamicResource StatValue}" />
                             </StackPanel>
                             <StackPanel Grid.Column="2">
-                                <TextBlock Text="会话数" Style="{DynamicResource StatLabel}" />
+                                <TextBlock x:Name="SessionsLabel" Text="会话数"
+                                           Style="{DynamicResource StatLabel}" />
                                 <TextBlock x:Name="SessionsValue" Text="—" Style="{DynamicResource StatValue}" />
                             </StackPanel>
                             <TextBlock x:Name="EstimateNote" Grid.Row="1" Grid.ColumnSpan="3"
@@ -255,7 +257,7 @@
                                                             <ColumnDefinition Width="*" />
                                                             <ColumnDefinition Width="Auto" />
                                                         </Grid.ColumnDefinitions>
-                                                        <local:ClientIcon ClientKey="{Binding ClientKey}"
+                                                        <local:ClientIcon ClientKey="{Binding IconKey}"
                                                                           IconSize="12"
                                                                           IconBrush="{Binding ColorHex, Converter={StaticResource HexToBrush}}"
                                                                           VerticalAlignment="Center" Margin="0,0,6,0" />
@@ -372,9 +374,9 @@
                     <StackPanel>
                         <Grid>
                             <StackPanel>
-                                <TextBlock Text="客户端用量分布" Style="{DynamicResource CardTitle}" />
-                                <TextBlock Text="按请求发生日期 · Token 用量" Style="{DynamicResource MutedText}"
-                                           Margin="0,3,0,0" />
+                                <TextBlock Text="客户端与设备分布" Style="{DynamicResource CardTitle}" />
+                                <TextBlock Text="按请求发生日期 · Token 用量 · 其他电脑按设备合计"
+                                           Style="{DynamicResource MutedText}" Margin="0,3,0,0" />
                             </StackPanel>
                         </Grid>
                         <ItemsControl x:Name="ClientUsageList" Margin="0,16,0,0">
@@ -393,7 +395,7 @@
                                                 <Grid Width="26" Height="26" Margin="0,0,8,0" VerticalAlignment="Center">
                                                     <Border CornerRadius="7" Opacity="0.12"
                                                             Background="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}" />
-                                                    <local:ClientIcon ClientKey="{Binding Client.Key}" IconSize="15"
+                                                    <local:ClientIcon ClientKey="{Binding IconKey}" IconSize="15"
                                                                       IconBrush="{Binding Client.ColorHex, Converter={StaticResource HexToBrush}}"
                                                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
                                                 </Grid>
@@ -497,10 +499,12 @@
                     <Grid Margin="0,0,0,12">
                         <StackPanel>
                             <TextBlock Text="会话视角" Style="{DynamicResource SectionTitle}" />
-                            <TextBlock Text="按会话开始日筛选，展示整段会话累计；与上方按请求时间的总量不可直接对账。"
+                            <TextBlock x:Name="SessionViewNote"
+                                       Text="按会话开始日筛选，展示整段会话累计；与上方按请求时间的总量不可直接对账。"
                                        Style="{DynamicResource MutedText}" Margin="0,3,0,0" />
                         </StackPanel>
-                        <Button Content="查看会话总账" Style="{DynamicResource LinkButton}"
+                        <Button x:Name="LedgerButton" Content="查看会话总账"
+                                Style="{DynamicResource LinkButton}"
                                 HorizontalAlignment="Right" VerticalAlignment="Top" Click="Ledger_Click" />
                     </Grid>
 
@@ -537,6 +541,8 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
+                                <TextBlock x:Name="NoModels" Text="其他设备不提供会话明细"
+                                           Style="{DynamicResource MutedText}" Visibility="Collapsed" />
                             </StackPanel>
                         </Border>
                         <Border Grid.Column="2" Style="{DynamicResource CardStyle}">
@@ -560,6 +566,8 @@
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
+                                <TextBlock x:Name="NoProjects" Text="其他设备不提供项目明细"
+                                           Style="{DynamicResource MutedText}" Visibility="Collapsed" />
                             </StackPanel>
                         </Border>
                     </Grid>
@@ -628,6 +636,9 @@
                                     <DataGridTextColumn ElementStyle="{StaticResource GridCellText}" Header="状态" Binding="{Binding Coverage}" Width="75" />
                                 </DataGrid.Columns>
                             </DataGrid>
+                            <TextBlock x:Name="NoRecentSessions" Text="其他设备不提供会话明细"
+                                       Style="{DynamicResource MutedText}" Margin="0,10,0,0"
+                                       Visibility="Collapsed" />
                         </StackPanel>
                     </Border>
 

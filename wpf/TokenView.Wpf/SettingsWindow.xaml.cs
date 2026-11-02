@@ -7,6 +7,7 @@ using System.Windows.Media;
 using Microsoft.Data.Sqlite;
 using TokenView.Wpf.Data;
 using TokenView.Wpf.Data.Collectors;
+using TokenView.Wpf.Data.Peers;
 using TokenView.Wpf.Services;
 using TokenView.Wpf.Settings;
 
@@ -17,6 +18,7 @@ public partial class SettingsWindow : Window
     private AppSettings _settings = new();
     private bool _loading = true;
     private string? _renderedAboutHash;
+    private string? _lanSignature;
 
     public SettingsWindow(int section = 0)
     {
@@ -24,20 +26,121 @@ public partial class SettingsWindow : Window
         WindowTheme.Apply(this);
         _settings = SettingsStore.Load();
         Populate();
+        // 先订阅再切换分类，避免按需加载开头的 IsFetching 通知被丢掉。
+        AboutInfoService.Current.Changed += OnAboutInfoChanged;
         NavList.SelectedIndex = Math.Clamp(section, 0, NavList.Items.Count - 1);
         _loading = false;
         SyncService.Current.Completed += OnSyncCompleted;
-        AboutInfoService.Current.Changed += OnAboutInfoChanged;
+        LanSyncService.Current.StatusChanged += OnLanStatusChanged;
+        LanSyncService.Current.PeersChanged += OnLanStatusChanged;
         Closed += (_, _) =>
         {
             SyncService.Current.Completed -= OnSyncCompleted;
             AboutInfoService.Current.Changed -= OnAboutInfoChanged;
+            LanSyncService.Current.StatusChanged -= OnLanStatusChanged;
+            LanSyncService.Current.PeersChanged -= OnLanStatusChanged;
         };
     }
 
     private void OnSyncCompleted(SyncBatch? batch, string? error)
     {
         Dispatcher.BeginInvoke(BuildClientList);
+    }
+
+    private void OnLanStatusChanged()
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            RenderLanStatus();
+            return;
+        }
+        Dispatcher.BeginInvoke(RenderLanStatus);
+    }
+
+    private void RenderLanStatus()
+    {
+        var status = LanSyncService.Current.Status;
+        LanStatusText.Text = status.Running
+            ? $"{status.SummaryText} · {status.ListenerText}"
+            : status.SummaryText;
+        LanLastImportText.Text = status.LastImportText;
+        LanErrorText.Text = status.ErrorText;
+        LanErrorText.Visibility = status.HasError ? Visibility.Visible : Visibility.Collapsed;
+        var signature = string.Join("|", status.Peers.Select(peer =>
+            $"{peer.DeviceId}:{peer.DeviceName}:{peer.Online}:{peer.LastSnapshotAtMs}:" +
+            $"{peer.ImportedAtMs}:{peer.Error}"));
+        if (string.Equals(signature, _lanSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+        _lanSignature = signature;
+        LanPeerList.ItemsSource = status.Peers;
+        LanNoPeers.Visibility = status.Peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void LanApply_Click(object sender, RoutedEventArgs e)
+    {
+        var enabled = LanSyncCheck.IsChecked == true;
+        var name = LanDeviceNameText.Text.Trim();
+        if (enabled && name.Length == 0)
+        {
+            MessageBox.Show(this, "请填写设备名称。", "局域网", MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+        _settings.LanSyncEnabled = enabled;
+        _settings.DeviceName = name;
+        if (enabled)
+        {
+            DeviceIdentity.Ensure(_settings);
+        }
+        SettingsStore.Save(_settings);
+        _settings = SettingsStore.Load();
+        LanSyncCheck.IsChecked = _settings.LanSyncEnabled;
+        LanDeviceNameText.Text = _settings.DeviceName;
+        LanSyncService.Current.ApplySettings(_settings);
+        RenderLanStatus();
+    }
+
+    private async void LanSyncNow_Click(object sender, RoutedEventArgs e)
+    {
+        _settings = SettingsStore.Load();
+        LanSyncService.Current.ApplySettings(_settings);
+        await LanSyncService.Current.RefreshNowAsync();
+        RenderLanStatus();
+    }
+
+    private void RemoveLanPeer_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string deviceId } || string.IsNullOrEmpty(deviceId))
+        {
+            return;
+        }
+        var result = MessageBox.Show(this,
+            "只移除本机已导入的该设备数据；对端不会被修改。若该设备仍在线，下一次同步会重新导入。是否继续？",
+            "移除设备", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+        PeerSnapshotStore.Remove(TokenViewDatabase.DatabasePath, deviceId);
+        LanSyncService.Current.NotifyPeersChanged();
+        RenderLanStatus();
+    }
+
+    private void ResetLanIdentity_Click(object sender, RoutedEventArgs e)
+    {
+        var result = MessageBox.Show(this,
+            "重置后，其他电脑会把本机识别为一台新设备；旧的设备条目需要在对端移除。是否继续？",
+            "重置设备标识", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+        DeviceIdentity.Reset(_settings);
+        _settings = SettingsStore.Load();
+        LanSyncService.Current.ApplySettings(_settings);
+        RenderLanStatus();
     }
 
     private void Populate()
@@ -72,6 +175,8 @@ public partial class SettingsWindow : Window
         PausedCheck.IsChecked = _settings.CollectionPaused;
         SyncOnStartCheck.IsChecked = _settings.SyncOnStart;
         AutomaticUpdatesCheck.IsChecked = _settings.AutomaticUpdates;
+        LanSyncCheck.IsChecked = _settings.LanSyncEnabled;
+        LanDeviceNameText.Text = _settings.DeviceName;
         DownloadUpdateButton.Visibility = Visibility.Collapsed;
         InstallUpdateButton.Visibility = Visibility.Collapsed;
         _preparedUpdate = null;
@@ -86,6 +191,7 @@ public partial class SettingsWindow : Window
         LastUpdateText.Text = lastCheck is null
             ? "尚未检查更新。"
             : $"上次检查：{DateTimeOffset.FromUnixTimeMilliseconds(lastCheck.Value).LocalDateTime:yyyy-MM-dd HH:mm}";
+        RenderLanStatus();
     }
 
     private static void SelectTag(ComboBox box, string tag)
@@ -114,10 +220,15 @@ public partial class SettingsWindow : Window
         GeneralPanel.Visibility = index == 0 ? Visibility.Visible : Visibility.Collapsed;
         AppearancePanel.Visibility = index == 1 ? Visibility.Visible : Visibility.Collapsed;
         CollectionPanel.Visibility = index == 2 ? Visibility.Visible : Visibility.Collapsed;
-        UpdatePanel.Visibility = index == 3 ? Visibility.Visible : Visibility.Collapsed;
-        DataPanel.Visibility = index == 4 ? Visibility.Visible : Visibility.Collapsed;
-        AboutPanel.Visibility = index == 5 ? Visibility.Visible : Visibility.Collapsed;
-        if (index == 5)
+        LanPanel.Visibility = index == 3 ? Visibility.Visible : Visibility.Collapsed;
+        UpdatePanel.Visibility = index == 4 ? Visibility.Visible : Visibility.Collapsed;
+        DataPanel.Visibility = index == 5 ? Visibility.Visible : Visibility.Collapsed;
+        AboutPanel.Visibility = index == 6 ? Visibility.Visible : Visibility.Collapsed;
+        if (index == 3)
+        {
+            RenderLanStatus();
+        }
+        if (index == 6)
         {
             _ = LoadAboutInfoAsync();
         }
@@ -125,7 +236,7 @@ public partial class SettingsWindow : Window
 
     private async Task LoadAboutInfoAsync()
     {
-        await AboutInfoService.Current.EnsureLoadedAsync();
+        await AboutInfoService.Current.EnsureLoadedOrRetryAsync();
     }
 
     private void AboutRetry_Click(object sender, RoutedEventArgs e)

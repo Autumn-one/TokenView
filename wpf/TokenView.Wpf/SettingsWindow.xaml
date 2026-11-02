@@ -6,6 +6,9 @@
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource WindowBrush}"
         FontFamily="Microsoft YaHei UI" UseLayoutRounding="True">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+    </Window.Resources>
     <Grid Margin="24">
         <Border Style="{DynamicResource CardStyle}" Padding="0">
             <Grid>
@@ -24,9 +27,10 @@
                             <ListBoxItem Content="通用" Tag="0" Padding="10,9" />
                             <ListBoxItem Content="外观与统计" Tag="1" Padding="10,9" />
                             <ListBoxItem Content="采集" Tag="2" Padding="10,9" />
-                            <ListBoxItem Content="更新" Tag="3" Padding="10,9" />
-                            <ListBoxItem Content="数据与隐私" Tag="4" Padding="10,9" />
-                            <ListBoxItem Content="关于" Tag="5" Padding="10,9" />
+                            <ListBoxItem Content="局域网" Tag="3" Padding="10,9" />
+                            <ListBoxItem Content="更新" Tag="4" Padding="10,9" />
+                            <ListBoxItem Content="数据与隐私" Tag="5" Padding="10,9" />
+                            <ListBoxItem Content="关于" Tag="6" Padding="10,9" />
                         </ListBox>
                     </StackPanel>
                 </Border>
@@ -141,6 +145,82 @@
                             <StackPanel x:Name="ClientListPanel" />
                             <TextBlock Text="重扫会重新读取该客户端当前可访问的数据；缺失字段保持未知，不估算、不补零。"
                                        Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                        </StackPanel>
+
+                        <StackPanel x:Name="LanPanel" Visibility="Collapsed">
+                            <TextBlock Text="局域网" Style="{DynamicResource SectionTitle}" />
+                            <TextBlock Text="同一局域网内的 TokenView 会自动发现并交换聚合用量；默认开启，可随时关闭。"
+                                       Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,22" />
+
+                            <CheckBox x:Name="LanSyncCheck"
+                                      Content="启用局域网自动发现与同步"
+                                      Margin="0,0,0,14" />
+                            <TextBlock Text="设备名称（会显示在其他电脑的列表中）" Style="{DynamicResource StatLabel}" />
+                            <TextBox x:Name="LanDeviceNameText" MaxLength="64" Margin="0,6,0,16" />
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+                                <Button Content="保存并应用" Style="{DynamicResource LinkButton}"
+                                        Click="LanApply_Click" Margin="0,0,16,0" />
+                                <Button Content="立即同步" Style="{DynamicResource LinkButton}"
+                                        Click="LanSyncNow_Click" Margin="0,0,16,0" />
+                                <Button Content="重置设备标识" Style="{DynamicResource LinkButton}"
+                                        Foreground="{DynamicResource DangerBrush}"
+                                        Click="ResetLanIdentity_Click" />
+                            </StackPanel>
+
+                            <TextBlock x:Name="LanStatusText" Style="{DynamicResource StatLabel}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock x:Name="LanLastImportText" Style="{DynamicResource MutedText}"
+                                       FontSize="11" Margin="0,3,0,0" />
+                            <TextBlock x:Name="LanErrorText" Foreground="{DynamicResource DangerBrush}"
+                                       FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"
+                                       Visibility="Collapsed" />
+
+                            <TextBlock Text="发现的设备" Style="{DynamicResource StatLabel}"
+                                       Margin="0,18,0,8" />
+                            <ItemsControl x:Name="LanPeerList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="{DynamicResource ChipBrush}" CornerRadius="8"
+                                                Padding="10,8" Margin="0,0,0,6">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding DeviceName}" FontWeight="SemiBold"
+                                                                   Foreground="{DynamicResource TextBrush}" />
+                                                        <TextBlock Text="{Binding OnlineText}" Margin="8,0,0,0"
+                                                                   Style="{DynamicResource MutedText}" />
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding DetailText}" Style="{DynamicResource MutedText}"
+                                                               FontSize="11" Margin="0,2,0,0" TextWrapping="Wrap" />
+                                                    <TextBlock Text="{Binding SnapshotText, StringFormat='快照：{0}'}"
+                                                               Style="{DynamicResource MutedText}" FontSize="11" />
+                                                    <TextBlock Text="{Binding ImportedText, StringFormat='导入：{0}'}"
+                                                               Style="{DynamicResource MutedText}" FontSize="11" />
+                                                    <TextBlock Text="{Binding WaitingText}" Style="{DynamicResource MutedText}"
+                                                               FontSize="11" />
+                                                    <TextBlock Text="{Binding ErrorText}" Foreground="{DynamicResource DangerBrush}"
+                                                               FontSize="11" TextWrapping="Wrap"
+                                                               Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+                                                </StackPanel>
+                                                <Button Grid.Column="1" Content="移除" Tag="{Binding DeviceId}"
+                                                        Style="{DynamicResource LinkButton}"
+                                                        VerticalAlignment="Top" Margin="12,0,0,0"
+                                                        Click="RemoveLanPeer_Click" />
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock x:Name="LanNoPeers"
+                                       Text="尚未发现其他电脑。请确认两台电脑在同一专用网络，并允许 TokenView 通过 Windows 防火墙。"
+                                       Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,0" />
+
+                            <TextBlock Text="只交换每台电脑的 Token / 请求 / 会话计数与客户端、模型聚合，不读取或传输会话正文、项目路径、会话标识或原始数据库。局域网内能访问本机端口的人可以读取这些聚合数据；共享网络请谨慎开启。首次启动时 Windows 可能询问是否允许 TokenView 通过防火墙，请选择专用网络。"
+                                       Style="{DynamicResource MutedText}" TextWrapping="Wrap" Margin="0,16,0,0" />
                         </StackPanel>
 
                         <StackPanel x:Name="UpdatePanel" Visibility="Collapsed">

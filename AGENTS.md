@@ -19,7 +19,8 @@ WorkBuddy、GitHub Copilot、Gemini CLI、Grok CLI、MCode、Devin、Command Cod
 
 必须坚持的三条底线：
 
-1. **本地优先**：默认不联网、不上传、不做遥测。
+1. **本地优先**：不访问互联网、不上传、不做遥测；局域网自动同步默认开启，只在本机所在私网
+   交换聚合用量，可在设置中关闭。
 2. **真实与估算分离**：任何指标都必须能回答"这是采集到的真实数据，还是推算出来的估算数据"（见 `docs/data-metrics.md`）。
 3. **隐私默认保护**：只读取统计所需的最小元数据，默认不落盘、不打印、不外传会话正文。
 
@@ -27,10 +28,11 @@ WorkBuddy、GitHub Copilot、Gemini CLI、Grok CLI、MCode、Devin、Command Cod
 是无界面的采集/查询验证工具，`wpf/TokenView.Tests` 是 xUnit 测试项目。程序集、命名空间、数据目录
 与库文件统一使用 TokenView；首次启动会把旧版自有数据迁移到新目录。
 
-公告与关于页动态信息已接入：启动时及每 20 分钟按固定镜像列表拉取公开的 `mirrors.json`、`README.md`
-与 `info.md`，用 Markdig 渲染为 WPF FlowDocument；正文只在内存，仅持久化 `lastReadAnnouncementHash`。
+公告与关于页动态信息已接入：公告在启动时及每 20 分钟按固定镜像列表拉取公开的 `mirrors.json` 与 `README.md`；
+关于页在首次打开时按需拉取同一镜像列表与 `info.md`，用 Markdig 渲染为 WPF FlowDocument；
+正文只在内存，仅持久化 `lastReadAnnouncementHash`。
 
-明确不做的事：云端账号体系、远程同步、修改或删除客户端的原始会话数据、绕过客户端自身配置读取数据、
+明确不做的事：云端账号体系、互联网云同步、修改或删除客户端的原始会话数据、绕过客户端自身配置读取数据、
 采集与统计无关的正文内容。
 
 ## 2. 技术栈与工具链
@@ -69,12 +71,13 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 | `wpf/TokenView.Wpf/Data/`           | 数据模型、SQLite 存储、查询与聚合（不含 UI）                         |
 | `wpf/TokenView.Wpf/Data/Collectors/`| 各客户端发现、解析、增量导入、同步调度                               |
 | `wpf/TokenView.Wpf/Data/Usage/`     | Token 语义、归一化模型、写入与去重                                   |
-| `wpf/TokenView.Wpf/Services/`       | 同步调度、托盘、自启、主题、窗口状态、存储迁移、更新检查、公告/关于信息与镜像获取 |
+| `wpf/TokenView.Wpf/Data/Peers/`     | 局域网聚合快照、peer 表导入与多设备查询辅助                         |
+| `wpf/TokenView.Wpf/Services/`       | 同步调度、局域网发现/快照交换、托盘、自启、主题、窗口状态、存储迁移、更新检查、公告/关于信息与镜像获取 |
 | `wpf/TokenView.Wpf/Controls/`       | 自绘图表、日期范围控件与 Markdown 渲染                               |
-| `wpf/TokenView.Wpf/Settings/`       | `settings.json` 读写与设置模型                                       |
+| `wpf/TokenView.Wpf/Settings/`       | `settings.json` 读写、设置模型与设备标识                             |
 | `wpf/TokenView.Wpf/Assets/`         | 应用图标与图标源文件（`app-icon.svg`、`tokenview.ico`）              |
-| `wpf/TokenView.Probe/`              | 无界面验证工具：复制库、同步、对账、自启开关、公告/关于拉取等        |
-| `wpf/TokenView.Tests/`              | xUnit 测试：镜像获取、配置合并、未读持久化、一次性加载、旧存储迁移    |
+| `wpf/TokenView.Probe/`              | 无界面验证工具：复制库、同步、对账、多设备快照导出/导入/回环校验、自启开关、公告/关于拉取等 |
+| `wpf/TokenView.Tests/`              | xUnit 测试：镜像获取、配置合并、未读持久化、一次性加载、旧存储迁移、多设备快照与回环发现 |
 | `docs/`                           | 规范与调研文档                                                       |
 | `scripts/`                        | 只读对账脚本（`reconcile_overview.py`）                              |
 
@@ -105,11 +108,16 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 ## 5. 安全要求
 
 - **最小权限**：只读取统计所需的客户端元数据；不申请管理员权限，不写客户端目录。
-- **网络**：默认零网络请求。已登记的联网入口只有两个：
+- **网络**：默认不访问互联网；已登记三个联网入口。局域网自动同步默认开启，其余默认关闭：
   1. 固定 GitHub Releases `latest.json` 的更新检查与同仓库更新包下载，只能由用户手动触发或开启自动更新后按每天最多一次触发；
      更新包必须校验 `latest.json` 中的 SHA-256，替换必须由用户确认重启，不静默覆盖运行中的程序。
-  2. 公告与关于页 Markdown：启动时一次 + 每 20 分钟，按固定镜像列表 GET 公开的 `mirrors.json`、`README.md` 与 `info.md`；
+  2. 公告与关于页 Markdown：公告启动时一次 + 每 20 分钟，关于页首次打开时按需拉取；
+     按固定镜像列表 GET 公开的 `mirrors.json`、`README.md` 与 `info.md`；
      不执行服务端下发的脚本/HTML，不加载远程图片，不上传任何本地数据。正文只在内存，仅持久化已读哈希。
+  3. 局域网多设备同步：UDP 17831 广播发现 + TCP 17832（占用时回退到后续端口）只提供本机聚合快照；
+     用户关闭后不监听、不广播；只接受私网/回环地址；只交换 Token / 请求 / 会话计数与客户端、模型聚合，
+     不读取或传输会话正文、项目路径、会话标识、源路径或原始数据库；不提供命令通道；不申请管理员权限、
+     不自动修改防火墙。共享/公共网络请关闭。
 - **不引入高风险能力**：不执行远程脚本（更新只接受校验过的 zip，安装脚本由本机生成）、不加载远程图片/HTML、
   不引入遥测 SDK；外部链接交给系统浏览器。
 - **隐私**：不把会话正文、项目路径、会话标识、错误原文写入日志、设置或仓库；诊断摘要必须脱敏。
@@ -125,16 +133,20 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 3. **可溯源分级**：每个指标必须标注来源等级——`measured`（客户端真实记录）、`derived`（由真实字段直接换算）、
    `estimated`（推算，例如按字符数估算 token）。估算不得与实测混在同一数值里。
 4. **估算可见**：UI 上估算数据必须有明确标注（图例、tooltip、样式区分），见 `docs/ui-guidelines.md`。
-5. **本地无出口**：除第 5 节登记的两个入口外默认无任何网络请求；联网能力必须先登记。
+5. **本地无出口**：除第 5 节登记的三个入口外默认无任何网络请求；联网能力必须先登记。
 6. **幂等**：重复扫描不得重复计数，唯一键与去重规则写在 `docs/data-metrics.md`。
 7. **口径变更留痕**：修改统计口径必须更新 `docs/data-metrics.md` 并记录版本、日期与影响。
 8. **可清除**：应用产生的本地数据必须提供一键清除方式，且不影响客户端原始数据。
+9. **多设备聚合只读本机表**：`peer_*` 只作为导入缓存，导出不得读取 `peer_*`，避免二次转发与循环累加；
+   其他电脑在图表/客户端分布中作为伪客户端（`peer:` 前缀）展示；多设备模式会话数按开始时间统计，
+   自定义范围其他设备按日聚合，UI 必须标注，不得冒充精确值或混入估算。
 
 ## 7. 测试与验证
 
 现状：`wpf/TokenView.Tests` 使用 xUnit（已登记于 `docs/architecture.md`），覆盖公告/关于的镜像获取、
-配置合并、哈希、未读持久化、一次性加载、旧版存储迁移与更新包解析/下载校验；测试只使用假
-`HttpMessageHandler` / `TimeProvider` 与临时目录，不访问真实网络、不依赖当前时间、不触碰真实 AppData。
+配置合并、哈希、未读持久化、一次性加载、旧版存储迁移、更新包解析/下载校验，以及多设备快照
+序列化/导入/合并与回环 UDP/TCP 发现；测试只使用假 `HttpMessageHandler` / `TimeProvider`、
+回环套接字与临时目录，不访问真实网络或真实 AppData；仅以当前时间构造相对时间窗口。
 新增可测试逻辑时补相应用例；测试数据只用合成内容，不要为了"看起来有测试"而创建无断言的占位测试。
 
 口径类改动（Token 语义、去重键、累计值、迁移）必须验证：
@@ -150,9 +162,11 @@ UI 改动必须实际启动应用验证：窗口可启动、关键路径可完�
 
 1. `dotnet build wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release`，必须零错误。
 2. 改动涉及服务层、公告/关于或配置逻辑时，运行 `dotnet test wpf/TokenView.Tests/TokenView.Tests.csproj -c Release`。
-3. 改动涉及 Probe 或采集逻辑时，构建 `wpf/TokenView.Probe` 并在数据库副本上验证。
+3. 改动涉及 Probe、采集或多设备聚合时，构建 `wpf/TokenView.Probe` 并在数据库副本上验证；
+   多设备可用 `probe peer-roundtrip <dbA> <dbB> <folder>` 双向导入并核对合计。
 4. 涉及界面或交互时，运行 `dotnet run --project wpf/TokenView.Wpf` 手动验证；
-   涉及托盘、关闭行为、自启时验证实际行为。
+   涉及托盘、关闭行为、自启时验证实际行为；涉及局域网同步时验证设备发现列表、在线/离线状态、
+   关闭后不再监听/广播、防火墙提示以及 800×600 窄窗口。
 5. 涉及统计数据时，抽样与客户端自身统计对账，并在提交说明中写出口径、差异与原因。
 6. 涉及新依赖、联网能力、目录结构或统计口径时，同步更新 `AGENTS.md` / `docs/` 对应文档。
 7. 自检清单：
@@ -160,6 +174,8 @@ UI 改动必须实际启动应用验证：窗口可启动、关键路径可完�
    - [ ] 没有把会话正文、路径或会话标识写入日志、缓存或仓库
    - [ ] 估算数据在 UI 上有明确标注
    - [ ] 采集器仍然只读，重复扫描幂等
+   - [ ] 局域网同步关闭后无 UDP/TCP 监听与广播；快照不含会话正文、项目路径或会话标识
+   - [ ] 多设备伪客户端、会话口径与自定义范围日粒度在 UI 上有标注
    - [ ] Release 构建与相关 `dotnet test` 通过，文档已同步
 
 ## 9. 规范维护

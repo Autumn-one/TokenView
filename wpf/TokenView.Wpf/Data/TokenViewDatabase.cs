@@ -1,5 +1,6 @@
 using System.IO;
 using Microsoft.Data.Sqlite;
+using TokenView.Wpf.Data.Peers;
 
 namespace TokenView.Wpf.Data;
 
@@ -54,14 +55,32 @@ public static class TokenViewDatabase
     public static RangeSelection CreateCustomRange(long fromMs, long toMs) =>
         new("custom", "自定义", fromMs, toMs, false);
 
-    public static OverviewSnapshot Load(RangeSelection range)
+    public const string PeerClientPrefix = "peer:";
+    public const string PeerColorHex = "#6b7280";
+
+    public static OverviewSnapshot Load(RangeSelection range) =>
+        Load(DatabasePath, range, DeviceSelection.Local);
+
+    public static OverviewSnapshot Load(RangeSelection range, DeviceSelection devices) =>
+        Load(DatabasePath, range, devices);
+
+    public static OverviewSnapshot Load(string databasePath, RangeSelection range,
+        DeviceSelection? devices = null)
     {
-        if (!File.Exists(DatabasePath))
+        if (!File.Exists(databasePath))
         {
-            throw new FileNotFoundException("未找到 TokenView 用量数据库。", DatabasePath);
+            throw new FileNotFoundException("未找到 TokenView 用量数据库。", databasePath);
         }
 
-        using var connection = OpenReadOnly();
+        using var connection = SqliteReadConnection.Open(databasePath);
+        var selection = devices ?? DeviceSelection.Local;
+        return selection.Scope == DeviceScope.Local
+            ? LoadLocal(connection, range)
+            : LoadMerged(connection, range, selection);
+    }
+
+    private static OverviewSnapshot LoadLocal(SqliteConnection connection, RangeSelection range)
+    {
         var from = range.FromMs;
         var to = range.ToMs;
 
@@ -117,6 +136,281 @@ public static class TokenViewDatabase
             RecentSessions = recent,
         };
     }
+
+    /// <summary>
+    /// 多设备视图：本机与 peer_* 直接相加；其他电脑作为一个伪客户端
+    /// （key 前缀 peer:）参与图表与客户端分布，而不是拆成对方的原始客户端。
+    /// </summary>
+    private static OverviewSnapshot LoadMerged(SqliteConnection connection, RangeSelection range,
+        DeviceSelection selection)
+    {
+        var peers = PeerUsageReader.ReadDevices(connection, selection);
+        var includeLocal = selection.Scope == DeviceScope.All;
+        var from = range.FromMs;
+        var to = range.ToMs;
+
+        if (range.Key == "all")
+        {
+            var localMin = includeLocal
+                ? ScalarLong(connection, "SELECT COALESCE(MIN(hour_ms), $1) FROM request_hourly", to)
+                : to;
+            var peerMin = to;
+            foreach (var peer in peers)
+            {
+                var min = PeerMinDay(connection, peer.DeviceId, to);
+                if (min < peerMin) peerMin = min;
+            }
+            from = Math.Min(localMin, peerMin);
+        }
+
+        if (!includeLocal && peers.Count == 0)
+        {
+            return EmptyOverview(range, from, to, selection);
+        }
+
+        var hourly = range.IsHourly;
+        var rows = new List<HourRow>();
+        if (includeLocal)
+        {
+            rows.AddRange(ReadHourRows(connection, from, to));
+        }
+        var peerRows = PeerUsageReader.ReadRequestRows(connection, peers, from, to, hourly);
+        foreach (var row in peerRows)
+        {
+            rows.Add(new HourRow(row.TimeMs, PeerClientPrefix + row.DeviceId, row.DeviceName,
+                PeerColorHex, row.Model, row.Requests, row.RequestsWithUsage,
+                row.RequestsWithoutUsage, row.Tokens));
+        }
+
+        var estimates = new List<EstimatedUsageRow>();
+        if (includeLocal)
+        {
+            estimates.AddRange(ReadEstimatedUsage(connection, from, to));
+        }
+        foreach (var row in peerRows)
+        {
+            if (row.EstimatedTokens <= 0 && row.EstimatedRequests <= 0) continue;
+            estimates.Add(new EstimatedUsageRow(PeerClientPrefix + row.DeviceId, row.Model,
+                row.EstimatedRequests, row.EstimatedTokens));
+        }
+
+        var sessionBuckets = new Dictionary<long, int>();
+        var clientSessions = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (includeLocal)
+        {
+            foreach (var pair in ReadLocalSessionBuckets(connection, from, to, hourly))
+            {
+                sessionBuckets[pair.Key] = sessionBuckets.GetValueOrDefault(pair.Key) + pair.Value;
+            }
+            foreach (var pair in ReadLocalSessionCountsByClient(connection, from, to))
+            {
+                clientSessions[pair.Key] = pair.Value;
+            }
+        }
+        foreach (var row in PeerUsageReader.ReadSessionRows(connection, peers, from, to, hourly))
+        {
+            sessionBuckets[row.TimeMs] = sessionBuckets.GetValueOrDefault(row.TimeMs) + row.Sessions;
+            var key = PeerClientPrefix + row.DeviceId;
+            clientSessions[key] = clientSessions.GetValueOrDefault(key) + row.Sessions;
+        }
+
+        var totalTokens = rows.Sum(row => row.Tokens);
+        var totalRequests = rows.Sum(row => row.Requests);
+        var withUsage = rows.Sum(row => row.RequestsWithUsage);
+        var withoutUsage = rows.Sum(row => row.RequestsWithoutUsage);
+        var sessions = sessionBuckets.Values.Sum();
+        var sessionsPartial = includeLocal
+            ? ScalarLong(connection,
+                "SELECT COUNT(*) FROM sessions WHERE message_coverage = 'partial'")
+            : 0;
+        sessionsPartial += peers.Sum(peer => peer.SessionsPartial);
+
+        var points = BuildChartPoints(range, from, to, rows, sessionBuckets);
+        var dailyStrip = points
+            .Select(point => new DailyStripRow(point.Label, point.TokenText))
+            .ToList();
+        var peerNames = peers.ToDictionary(peer => PeerClientPrefix + peer.DeviceId,
+            peer => peer.Name, StringComparer.Ordinal);
+        var clients = BuildMergedClientUsage(rows, clientSessions, estimates, peerNames, totalTokens);
+        var models = includeLocal
+            ? ReadRanking(connection, "model", from, to)
+            : new List<RankingRow>();
+        var projects = includeLocal
+            ? ReadRanking(connection, "project_path", from, to)
+            : new List<RankingRow>();
+        var recent = includeLocal
+            ? ReadRecentSessions(connection, from, to)
+            : new List<SessionRow>();
+
+        return new OverviewSnapshot
+        {
+            RangeText = BuildRangeText(from, to, range.IsHourly, includeDayCount: true),
+            RangeDaysText = $"共 {RangeDayCount(from, to)} 天",
+            RangeFromMs = from,
+            RangeToMs = to,
+            IsHourly = range.IsHourly,
+            TotalRequests = totalRequests,
+            RequestsWithUsage = withUsage,
+            RequestsWithoutUsage = withoutUsage,
+            Sessions = sessions,
+            SessionsPartial = (int)Math.Min(sessionsPartial, int.MaxValue),
+            TotalTokens = totalTokens,
+            EstimatedTokens = estimates.Sum(row => row.Tokens),
+            EstimatedRequests = estimates.Sum(row => row.Requests),
+            ChartPoints = points,
+            DailyStrip = dailyStrip,
+            Clients = clients,
+            Models = models,
+            Projects = projects,
+            RecentSessions = recent,
+            Scope = selection.Scope,
+            SessionsStartBased = true,
+            DetailsLocalOnly = true,
+            PeerGranularityDaily = !hourly && range.Key == "custom" &&
+                (!IsLocalMidnight(from) || !IsLocalMidnight(to)),
+        };
+    }
+
+    private static OverviewSnapshot EmptyOverview(RangeSelection range, long from, long to,
+        DeviceSelection selection) => new()
+    {
+        RangeText = BuildRangeText(from, to, range.IsHourly, includeDayCount: true),
+        RangeDaysText = $"共 {RangeDayCount(from, to)} 天",
+        RangeFromMs = from,
+        RangeToMs = to,
+        IsHourly = range.IsHourly,
+        Scope = selection.Scope,
+        SessionsStartBased = true,
+        DetailsLocalOnly = true,
+    };
+
+    private static List<ClientUsageRow> BuildMergedClientUsage(
+        IReadOnlyList<HourRow> rows,
+        IReadOnlyDictionary<string, int> clientSessions,
+        IReadOnlyList<EstimatedUsageRow> estimates,
+        IReadOnlyDictionary<string, string> peerNames,
+        long totalTokens)
+    {
+        var estimatesByClient = estimates
+            .GroupBy(row => row.Client)
+            .ToDictionary(group => group.Key,
+                group => (Tokens: group.Sum(row => row.Tokens),
+                    Requests: group.Sum(row => row.Requests)));
+        var result = new List<ClientUsageRow>();
+        foreach (var group in rows.GroupBy(row => row.Client))
+        {
+            var first = group.First();
+            var tokens = group.Sum(row => row.Tokens);
+            var requests = group.Sum(row => row.Requests);
+            var withoutUsage = group.Sum(row => row.RequestsWithoutUsage);
+            var client = new ClientInfo(group.Key, first.ClientLabel, first.ColorHex);
+            var models = group
+                .GroupBy(row => string.IsNullOrWhiteSpace(row.Model) ? "—" : row.Model)
+                .Select(model =>
+                {
+                    var modelTokens = model.Sum(row => row.Tokens);
+                    return new ClientModelRow(model.Key, model.Sum(row => row.Requests), modelTokens,
+                        tokens == 0 ? 0 : (double)modelTokens / tokens,
+                        model.Sum(row => row.RequestsWithoutUsage));
+                })
+                .OrderByDescending(row => row.Tokens)
+                .ThenByDescending(row => row.Requests)
+                .ToList();
+            var estimate = estimatesByClient.GetValueOrDefault(group.Key);
+            result.Add(new ClientUsageRow(client, clientSessions.GetValueOrDefault(group.Key),
+                requests, withoutUsage, tokens,
+                totalTokens == 0 ? 0 : (double)tokens / totalTokens,
+                models, estimate.Tokens, estimate.Requests, false, true));
+        }
+        foreach (var group in estimates.GroupBy(row => row.Client))
+        {
+            if (rows.Any(row => string.Equals(row.Client, group.Key, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+            var label = ResolveClientLabel(group.Key, peerNames);
+            var color = group.Key.StartsWith(PeerClientPrefix, StringComparison.Ordinal)
+                ? PeerColorHex
+                : Clients.GetValueOrDefault(group.Key)?.ColorHex ?? PeerColorHex;
+            var client = new ClientInfo(group.Key, label, color);
+            result.Add(new ClientUsageRow(client, clientSessions.GetValueOrDefault(group.Key),
+                0, 0, 0, 0, Array.Empty<ClientModelRow>(),
+                group.Sum(row => row.Tokens), group.Sum(row => row.Requests), false, true));
+        }
+        return result
+            .OrderByDescending(row => row.Tokens)
+            .ThenByDescending(row => row.EstimatedTokens)
+            .ThenByDescending(row => row.Requests)
+            .ToList();
+    }
+
+    private static string ResolveClientLabel(string key, IReadOnlyDictionary<string, string> peerNames)
+    {
+        if (key.StartsWith(PeerClientPrefix, StringComparison.Ordinal))
+        {
+            return peerNames.GetValueOrDefault(key, "其他设备");
+        }
+        return Clients.GetValueOrDefault(key)?.Label ?? key;
+    }
+
+    private static Dictionary<long, int> ReadLocalSessionBuckets(SqliteConnection connection,
+        long from, long to, bool hourly)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT started_at_ms FROM sessions
+            WHERE started_at_ms >= $from AND started_at_ms < $to;
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+        var buckets = new Dictionary<long, int>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var value = reader.GetInt64(0);
+            var key = hourly
+                ? LocalHourStart(value)
+                : StartOfDay(DateTimeOffset.FromUnixTimeMilliseconds(value).LocalDateTime.Date);
+            buckets[key] = buckets.GetValueOrDefault(key) + 1;
+        }
+        return buckets;
+    }
+
+    private static Dictionary<string, int> ReadLocalSessionCountsByClient(SqliteConnection connection,
+        long from, long to)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT client, COUNT(*) FROM sessions
+            WHERE started_at_ms >= $from AND started_at_ms < $to
+            GROUP BY client;
+            """;
+        command.Parameters.AddWithValue("$from", from);
+        command.Parameters.AddWithValue("$to", to);
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            counts[reader.GetString(0)] = reader.GetInt32(1);
+        }
+        return counts;
+    }
+
+    private static long PeerMinDay(SqliteConnection connection, string deviceId, long fallback)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(MIN(day_ms), $fallback) FROM peer_request_daily
+            WHERE device_id = $device;
+            """;
+        command.Parameters.AddWithValue("$fallback", fallback);
+        command.Parameters.AddWithValue("$device", deviceId);
+        var result = command.ExecuteScalar();
+        return result is null or DBNull ? fallback : Convert.ToInt64(result);
+    }
+
+    private static bool IsLocalMidnight(long value) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(value).LocalDateTime.TimeOfDay == TimeSpan.Zero;
 
     public static SessionDetailSnapshot LoadSessionDetail(string clientKey, string clientSessionId,
         int offset = 0, int limit = 100)
@@ -426,26 +720,13 @@ public static class TokenViewDatabase
             measuredSessions.Count, measuredSessionsWithoutUsage, estimatedTokens);
     }
 
-    private static SqliteConnection OpenReadOnly()
-    {
-        var builder = new SqliteConnectionStringBuilder
-        {
-            DataSource = DatabasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            // Pooling=false 下共享缓存没有收益，只让页缓存的生命周期跨越连接。
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-        };
-        var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;";
-        command.ExecuteNonQuery();
-        return connection;
-    }
+    private static SqliteConnection OpenReadOnly() => OpenReadOnlyConnection(DatabasePath);
 
-    private sealed record HourRow(long HourMs, string Client, string Model, int Requests,
-        int RequestsWithUsage, int RequestsWithoutUsage, long Tokens);
+    internal static SqliteConnection OpenReadOnlyConnection(string databasePath) =>
+        SqliteReadConnection.Open(databasePath);
+
+    private sealed record HourRow(long HourMs, string Client, string ClientLabel, string ColorHex,
+        string Model, int Requests, int RequestsWithUsage, int RequestsWithoutUsage, long Tokens);
 
     private static List<HourRow> ReadHourRows(SqliteConnection connection, long from, long to)
     {
@@ -465,9 +746,13 @@ public static class TokenViewDatabase
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
+            var key = reader.GetString(1);
+            var client = Clients.GetValueOrDefault(key) ?? new ClientInfo(key, key, PeerColorHex);
             rows.Add(new HourRow(
                 reader.GetInt64(0),
-                reader.GetString(1),
+                key,
+                client.Label,
+                client.ColorHex,
                 reader.GetString(2),
                 reader.GetInt32(3),
                 reader.GetInt32(4),
@@ -563,9 +848,8 @@ public static class TokenViewDatabase
             .GroupBy(row => row.Client)
             .Select(group =>
             {
-                var client = Clients.GetValueOrDefault(group.Key) ??
-                    new ClientInfo(group.Key, group.Key, "#6b7280");
-                return new ChartClientSlice(group.Key, client.Label, client.ColorHex,
+                var first = group.First();
+                return new ChartClientSlice(group.Key, first.ClientLabel, first.ColorHex,
                     group.Sum(row => row.Tokens),
                     group.Sum(row => row.Requests),
                     group.Sum(row => row.RequestsWithoutUsage));

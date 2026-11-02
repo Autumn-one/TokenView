@@ -1,7 +1,9 @@
+using System.Net;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using TokenView.Wpf.Data;
 using TokenView.Wpf.Data.Collectors;
+using TokenView.Wpf.Data.Peers;
 using TokenView.Wpf.Data.Usage;
 using TokenView.Wpf.Services;
 
@@ -13,7 +15,10 @@ if (args.Length == 1 && args[0] is "announcement" or "about-info")
 if (args.Length < 2)
 {
     Console.WriteLine("usage: probe copy <source> <target> | probe sync <db> [--force] [clients...] | " +
-                      "probe totals <db> | probe announcement | probe about-info");
+                      "probe totals <db> | probe peer-export <db> <out> [--device <id>] [--name <name>] | " +
+                      "probe peer-import <db> <snapshot> | probe peer-totals <db> [local] [range] | " +
+                      "probe peer-roundtrip <dbA> <dbB> <folder> | " +
+                      "probe lan-peer <db> <name> [targetUdpPort] | probe announcement | probe about-info");
     return 1;
 }
 
@@ -151,9 +156,120 @@ switch (mode)
         Console.WriteLine($"sessions={sessions.ExecuteScalar()}");
         return 0;
     }
+    case "peer-export":
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine("usage: probe peer-export <db> <out> [--device <id>] [--name <name>]");
+            return 1;
+        }
+        var deviceId = Option(args, "--device") ?? Guid.NewGuid().ToString("N");
+        var deviceName = Option(args, "--name") ?? Environment.MachineName;
+        var document = PeerSnapshotBuilder.Build(database, deviceId, deviceName,
+            UpdateService.CurrentVersion);
+        PeerSnapshotSerializer.WriteFile(args[2], document);
+        Console.WriteLine($"device={document.DeviceId} name={document.DeviceName} " +
+                          $"daily={document.RequestDaily.Count} hourly={document.RequestHourly.Count} " +
+                          $"sessions={document.SessionDaily.Count} " +
+                          $"tokens={document.RequestDaily.Sum(row => row.Tokens)}");
+        return 0;
+    }
+    case "peer-import":
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine("usage: probe peer-import <db> <snapshot>");
+            return 1;
+        }
+        var document = PeerSnapshotSerializer.ReadFile(args[2]);
+        var result = PeerSnapshotStore.Import(database, document);
+        Console.WriteLine($"imported={result.Imported} stale={result.StaleSkipped} " +
+                          $"device={result.DeviceId} name={result.DeviceName} " +
+                          $"daily={result.RequestDailyRows} hourly={result.RequestHourlyRows}");
+        return 0;
+    }
+    case "peer-totals":
+    {
+        var scope = args.Length > 2 &&
+                    string.Equals(args[2], "local", StringComparison.OrdinalIgnoreCase)
+            ? DeviceSelection.Local
+            : DeviceSelection.All;
+        var range = TokenViewDatabase.CreateRange(args.Length > 3 ? args[3] : "7d");
+        var snapshot = TokenViewDatabase.Load(database, range, scope);
+        Console.WriteLine($"scope={snapshot.Scope} tokens={snapshot.TotalTokens} " +
+                          $"requests={snapshot.TotalRequests} sessions={snapshot.Sessions} " +
+                          $"estimated={snapshot.EstimatedTokens} clients={snapshot.Clients.Count}");
+        foreach (var row in snapshot.Clients)
+        {
+            Console.WriteLine(
+                $"{row.Client.Key}\t{row.Client.Label}\t{row.Tokens}\t{row.Requests}\t{row.Sessions}");
+        }
+        return 0;
+    }
+    case "peer-roundtrip":
+    {
+        if (args.Length < 4)
+        {
+            Console.WriteLine("usage: probe peer-roundtrip <dbA> <dbB> <folder>");
+            return 1;
+        }
+        var dbA = args[1];
+        var dbB = args[2];
+        var folder = args[3];
+        System.IO.Directory.CreateDirectory(folder);
+        var idA = Guid.NewGuid().ToString("N");
+        var idB = Guid.NewGuid().ToString("N");
+        var documentA = PeerSnapshotBuilder.Build(dbA, idA, "PC-A", UpdateService.CurrentVersion);
+        var documentB = PeerSnapshotBuilder.Build(dbB, idB, "PC-B", UpdateService.CurrentVersion);
+        PeerSnapshotSerializer.WriteFile(
+            System.IO.Path.Combine(folder, "A.tokenview.json.gz"), documentA);
+        PeerSnapshotSerializer.WriteFile(
+            System.IO.Path.Combine(folder, "B.tokenview.json.gz"), documentB);
+        var importedB = PeerSnapshotStore.Import(dbA, documentB);
+        var importedA = PeerSnapshotStore.Import(dbB, documentA);
+        var range = TokenViewDatabase.CreateRange("all");
+        var localA = TokenViewDatabase.Load(dbA, range, DeviceSelection.Local);
+        var localB = TokenViewDatabase.Load(dbB, range, DeviceSelection.Local);
+        var allA = TokenViewDatabase.Load(dbA, range, DeviceSelection.All);
+        var expected = localA.TotalTokens + localB.TotalTokens;
+        Console.WriteLine($"importA={importedA.Imported} importB={importedB.Imported} " +
+                          $"localA={localA.TotalTokens} localB={localB.TotalTokens} " +
+                          $"combined={allA.TotalTokens} expected={expected}");
+        var ok = allA.TotalTokens == expected &&
+                 allA.TotalRequests == localA.TotalRequests + localB.TotalRequests;
+        Console.WriteLine(ok ? "OK" : "MISMATCH");
+        return ok ? 0 : 1;
+    }
+    case "lan-peer":
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine("usage: probe lan-peer <db> <name> [targetUdpPort=17831]");
+            return 1;
+        }
+        var targetPort = args.Length > 3 && int.TryParse(args[3], out var parsedPort)
+            ? parsedPort
+            : 17831;
+        var deviceId = Guid.NewGuid().ToString("N");
+        var service = new LanSyncService();
+        service.Start(new LanSyncOptions(database, deviceId, args[2],
+            UpdateService.CurrentVersion, true, 0, 0, IPAddress.Loopback,
+            [new IPEndPoint(IPAddress.Loopback, targetPort)], null,
+            TimeSpan.FromSeconds(1)));
+        Console.WriteLine($"lan-peer device={deviceId} name={args[2]} " +
+                          $"udp={service.UdpPort} tcp={service.TcpPort} target={targetPort}");
+        await Task.Delay(Timeout.Infinite);
+        return 0;
+    }
     default:
         Console.WriteLine($"unknown mode {mode}");
         return 1;
+}
+
+static string? Option(string[] arguments, string name)
+{
+    var index = Array.IndexOf(arguments, name);
+    return index >= 0 && index + 1 < arguments.Length ? arguments[index + 1] : null;
 }
 
 static void WriteMemory()

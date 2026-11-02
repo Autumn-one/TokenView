@@ -288,8 +288,19 @@ public sealed class UsageStore : IDisposable
         Execute(transaction, "DELETE FROM messages; DELETE FROM sessions; DELETE FROM source_files;");
         Execute(transaction, "DELETE FROM request_hourly");
         Execute(transaction, "DELETE FROM request_hourly_sessions");
+        // peer_devices 的级联会清空所有导入的其他设备快照；共享的局域网设备本身不受影响。
+        Execute(transaction, "DELETE FROM peer_devices");
         Execute(transaction, "UPDATE usage_rollup_state SET request_dirty = 0 WHERE id = 1");
         transaction.Commit();
+    }
+
+    /// <summary>让同程序集的 peer 存储复用本库连接与事务，避免复制连接配置或反向依赖 DTO。</summary>
+    internal T ExecuteInTransaction<T>(Func<SqliteConnection, SqliteTransaction, T> action)
+    {
+        using var transaction = _connection.BeginTransaction();
+        var result = action(_connection, transaction);
+        transaction.Commit();
+        return result;
     }
 
     public bool RequestRollupIsFresh()
@@ -715,6 +726,73 @@ public sealed class UsageStore : IDisposable
             CREATE INDEX idx_messages_model ON messages (model);
             """;
 
+        private const string MultiDeviceSchema = """
+            CREATE TABLE peer_devices (
+                device_id          TEXT PRIMARY KEY,
+                name               TEXT    NOT NULL,
+                generated_at_ms    INTEGER NOT NULL,
+                imported_at_ms     INTEGER NOT NULL,
+                schema_version     INTEGER NOT NULL,
+                utc_offset_minutes INTEGER NOT NULL,
+                app_version        TEXT    NOT NULL,
+                sessions_partial   INTEGER NOT NULL
+            );
+
+            CREATE TABLE peer_request_daily (
+                device_id              TEXT    NOT NULL REFERENCES peer_devices (device_id) ON DELETE CASCADE,
+                day_ms                 INTEGER NOT NULL,
+                client                 TEXT    NOT NULL,
+                model                  TEXT    NOT NULL,
+                requests               INTEGER NOT NULL,
+                requests_with_usage    INTEGER NOT NULL,
+                requests_without_usage INTEGER NOT NULL,
+                tokens                 INTEGER NOT NULL,
+                estimated_tokens       INTEGER NOT NULL,
+                estimated_requests     INTEGER NOT NULL,
+                PRIMARY KEY (device_id, day_ms, client, model)
+            );
+
+            CREATE INDEX idx_peer_request_daily_day ON peer_request_daily (device_id, day_ms);
+
+            CREATE TABLE peer_request_hourly (
+                device_id              TEXT    NOT NULL REFERENCES peer_devices (device_id) ON DELETE CASCADE,
+                hour_ms                INTEGER NOT NULL,
+                client                 TEXT    NOT NULL,
+                model                  TEXT    NOT NULL,
+                requests               INTEGER NOT NULL,
+                requests_with_usage    INTEGER NOT NULL,
+                requests_without_usage INTEGER NOT NULL,
+                tokens                 INTEGER NOT NULL,
+                estimated_tokens       INTEGER NOT NULL,
+                estimated_requests     INTEGER NOT NULL,
+                PRIMARY KEY (device_id, hour_ms, client, model)
+            );
+
+            CREATE INDEX idx_peer_request_hourly_hour ON peer_request_hourly (device_id, hour_ms);
+
+            CREATE TABLE peer_session_daily (
+                device_id          TEXT    NOT NULL REFERENCES peer_devices (device_id) ON DELETE CASCADE,
+                day_ms             INTEGER NOT NULL,
+                client             TEXT    NOT NULL,
+                sessions           INTEGER NOT NULL,
+                estimated_sessions INTEGER NOT NULL,
+                PRIMARY KEY (device_id, day_ms, client)
+            );
+
+            CREATE INDEX idx_peer_session_daily_day ON peer_session_daily (device_id, day_ms);
+
+            CREATE TABLE peer_session_hourly (
+                device_id          TEXT    NOT NULL REFERENCES peer_devices (device_id) ON DELETE CASCADE,
+                hour_ms            INTEGER NOT NULL,
+                client             TEXT    NOT NULL,
+                sessions           INTEGER NOT NULL,
+                estimated_sessions INTEGER NOT NULL,
+                PRIMARY KEY (device_id, hour_ms, client)
+            );
+
+            CREATE INDEX idx_peer_session_hourly_hour ON peer_session_hourly (device_id, hour_ms);
+            """;
+
         private const string RollupSchema = """
             CREATE TABLE request_hourly (
                 hour_ms              INTEGER NOT NULL,
@@ -783,6 +861,7 @@ public sealed class UsageStore : IDisposable
                          (1, "initial_usage_schema", InitialSchema),
                          (2, "request_rollup", RollupSchema),
                          (3, "refresh_request_rollup_once", "UPDATE usage_rollup_state SET request_dirty = 1 WHERE id = 1;"),
+                         (4, "multi_device_snapshots", MultiDeviceSchema),
                      })
             {
                 if (version <= current) continue;

@@ -9,13 +9,15 @@
 唯一实现是 C# / .NET 10 / WPF 桌面应用 `wpf/TokenView.Wpf`（`net10.0-windows`），
 外加无界面验证工具 `wpf/TokenView.Probe` 与 xUnit 测试项目 `wpf/TokenView.Tests`。应用读取本机
 AI 编程客户端的会话元数据，写入本地 SQLite 用量库，再聚合为界面数据；不上传本地数据、
-不修改客户端原始数据，网络只用于第 1 条底线里登记的入口。
+不修改客户端原始数据，网络只用于登记入口。局域网自动同步默认开启，可在设置关闭。
 
 三条底线约束所有架构决策：
 
-1. **本地优先**：默认零网络请求。已登记的联网入口只有两个：固定 GitHub Releases `latest.json`
-   的更新检查，以及公告/关于页从固定公开镜像列表拉取 Markdown（启动一次 + 每 20 分钟，
-   不加载远程图片/HTML、不上传本地数据，正文只存内存）。
+1. **本地优先**：默认不访问互联网；已登记三个联网入口：固定 GitHub Releases `latest.json`
+   的更新检查，公告/关于页从固定公开镜像列表拉取 Markdown（启动一次 + 每 20 分钟，
+   不加载远程图片/HTML、不上传本地数据，正文只存内存），以及局域网多设备同步
+   （UDP 17831 广播发现 + TCP 17832 只提供本机聚合快照；默认开启、可关闭，只接受私网/回环，
+   不读取对端数据库，不提供命令通道）。
 2. **真实与估算分离**：每条记录携带 `source_kind`（`measured` / `derived` / `estimated`），
    会话总量另带 `total_basis`，明细完整度另带 `message_coverage`；换算关系不明的字段进入
    `unknown_relations`，不静默推断。
@@ -31,16 +33,18 @@ AI 编程客户端的会话元数据，写入本地 SQLite 用量库，再聚合
 ```text
 MainWindow / SettingsWindow / SessionLedgerWindow / SessionDetailWindow / CloseWindowDialog / AnnouncementWindow
         │（视图状态、格式化、事件转发）
-        ├──→ Services：SyncService、SyncSchedule、TrayService、ThemeManager、WindowTheme、
+        ├──→ Services：SyncService、SyncSchedule、LanSyncService、TrayService、ThemeManager、WindowTheme、
         │              AutostartService、WindowStateStore、StorageRelocationService、UpdateService、UpdateInstaller、
         │              AnnouncementService、AboutInfoService、MirrorContentService
-        └──→ Data：TokenViewDatabase（只读查询）、TokenFormatting
+        └──→ Data：TokenViewDatabase（只读查询 / 多设备合并）、TokenFormatting
                     │
 Controls：RequestLineChart ──→ Data（ChartPoint / ChartMetric / TokenFormatting）
           DailyStripPanel、DateTimeRangePicker ──→ 仅 WPF 基础类型，不引用 Data / Services
           MarkdownView ──→ Markdig（AST 渲染为 FlowDocument），不引用 Data / Services
 
 Services：SyncService ──→ Data.Collectors.SyncEngine ──→ 各 *Collector ──→ Data.Usage.UsageStore
+          LanSyncService ──→ LanDiscovery / LanSnapshotServer / LanSnapshotClient
+                          ──→ Data.Peers.PeerSnapshotBuilder / PeerSnapshotStore
           StorageRelocationService ──→ Data.Collectors（来源路径校验）＋ Settings
           ThemeManager / AutostartService ──→ Settings；WindowStateStore / UpdateService / UpdateInstaller ──→ 无领域依赖
           AnnouncementService / AboutInfoService ──→ IContentFetcher ←── MirrorContentService
@@ -48,7 +52,10 @@ Services：SyncService ──→ Data.Collectors.SyncEngine ──→ 各 *Colle
 
 Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemantics）
       *Collector ──→ RequestBuilder / CollectorSupport / SqliteSnapshot ──→ Usage
-      TokenViewDatabase ──→ Usage（间接）＋ 根命名空间的展示记录（Models.cs）
+      TokenViewDatabase ──→ Usage（间接）＋ 根命名空间展示记录（Models.cs）
+                        └──→ Data.Peers（DeviceSelection / PeerUsageReader / PeerDeviceRow）
+      PeerSnapshotBuilder / PeerSnapshotStore / PeerSnapshotSerializer
+          ──→ Usage / SqliteReadConnection；导出只读本机表，绝不读 peer_*
 ```
 
 - 公告与关于的网络访问只集中在 `MirrorContentService`（`IContentFetcher` 的唯一实现），
@@ -62,6 +69,9 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   `System.Windows` 依赖，唯一的外部引用是 `Data/TokenFormatting.cs` 使用 `Settings.TokenDisplay`
   （设置模型不是 UI，允许）。
 - 采集器只读客户端文件、只写 TokenView 自有库；不执行界面逻辑、不发网络请求。
+- 多设备导出只读本机 `request_hourly` / `sessions` / `messages`，不得读 `peer_*`；`peer_*` 只作为
+  导入缓存，不写回本机统计表。局域网服务只提供一种只读快照请求，只接受私网/回环地址，
+  不提供命令、文件或数据库访问。
 - `UsageStore` 只接受归一化后的记录，不解析任何客户端原始格式；`TokenViewDatabase` 只做只读查询。
 - `Services` 是桌面生命周期与调度层，可以被窗口和 `StorageRelocationService` 使用，
   但 `Data` 不反向引用 `Services`。
@@ -80,6 +90,20 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
    → request_hourly 预聚合（脏标记 + 批次结束后整体重建）
    → TokenViewDatabase 只读查询（OverviewSnapshot / LedgerSnapshot / SessionDetailSnapshot）
    → 窗口与控件渲染
+```
+
+多设备数据流（默认开启）：
+
+```text
+本机同步完成 / 10 分钟心跳
+   → PeerSnapshotBuilder 只读本机 request_hourly / sessions / messages
+   → GZip 聚合快照（只含 Token / 请求 / 会话计数与客户端、模型，无会话标识 / 项目路径）
+   → LanSnapshotServer 在 TCP 上只响应一种拉取请求
+对端 UDP 17831 广播
+   → LanSyncService 发现设备 → LanSnapshotClient 拉取聚合快照
+   → PeerSnapshotStore 在事务内写 peer_* 表
+   → TokenViewDatabase.Load(DeviceSelection.All / Peer) 合并
+   → 其他电脑作为 peer:<deviceId> 伪客户端进入图表与客户端分布
 ```
 
 关键机制：
@@ -112,15 +136,16 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
 | 路径                                       | 内容与实际成员                                                                                                                                                                                                                                            | 职责边界                                                                                     |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `wpf/TokenView.Wpf/`（根命名空间）           | `App`（单实例、主题、自启、窗口创建、公告调度、退出等待）、`MainWindow`、`SettingsWindow`、`SessionLedgerWindow`、`SessionDetailWindow`、`CloseWindowDialog`、`AnnouncementWindow`、`Models.cs`（展示记录）、`ClientIcon` / `ClientIconData`、`ModelIcon` / `ModelIconData`、`ShareBar`、`HexToBrushConverter`、`StoragePaths`、`Theme.xaml` | 视图与视图状态；不实现统计口径                                                               |
-| `wpf/TokenView.Wpf/Data/`                    | `TokenViewDatabase`（区间构造、总览 / 总账 / 会话详情 / 客户端统计查询、今日托盘摘要）、`TokenFormatting`                                                                                                                                                    | 只读查询与展示格式化；不写库、不读客户端文件                                                 |
+| `wpf/TokenView.Wpf/Data/`                    | `TokenViewDatabase`（区间构造、总览 / 总账 / 会话详情 / 客户端统计查询、今日托盘摘要、多设备 `Load` 与设备选择）、`SqliteReadConnection`、`TokenFormatting`                                                                                                      | 只读查询与展示格式化；不写库、不读客户端文件                                                 |
+| `wpf/TokenView.Wpf/Data/Peers/`              | `PeerSnapshotDocument` / `PeerSnapshotBuilder` / `PeerSnapshotSerializer` / `PeerSnapshotStore` / `PeerUsageReader` / `DeviceSelection`                                                                                                                       | 聚合快照生成/校验、peer 表导入与多设备查询辅助；不读客户端文件、不发网络                     |
 | `wpf/TokenView.Wpf/Data/Collectors/`         | `SyncEngine`、`CollectorContracts`（`IClientCollector` / `SyncReport` / `SyncException` / `SyncBatch` / `SyncProgress`）、`CollectorSupport`、`SqliteSnapshot`、`RequestBuilder`、18 个 `*Collector`                                                        | 发现、解析、归一化入口、同步协调；只写 `UsageStore` API                                      |
 | `wpf/TokenView.Wpf/Data/Usage/`              | `UsageModels`（`SessionRecord` / `MessageRecord` / `SourceFile` / `UsageIds` / `UsageTime`）、`NormalizedUsage`（`RawTokenCounts` / `TokenBuckets` / `UsageNormalizer`）、`TokenSemantics`（`TokenSemanticsCatalog`）、`UsageStore`（迁移、写入、快照、预聚合） | 统一数据模型、Token 语义、SQLite 存储；纯领域逻辑，可用合成数据验证                          |
-| `wpf/TokenView.Wpf/Services/`                | `SyncService`、`SyncSchedule`、`TrayService`、`ThemeManager`、`WindowTheme`、`AutostartService`、`WindowStateStore`、`LegacyStorageMigration`、`StorageRelocationService`、`UpdateService`、`UpdateInstaller`、`MirrorContentService`（唯一 HTTP 层）、`AnnouncementService`、`AboutInfoService`、`MirrorsConfig` / `MirrorUrl` / `SourceConfig` / `RepoConfig` | 桌面生命周期、调度、存储迁移、更新下载/替换与公开 Markdown 拉取                                  |
+| `wpf/TokenView.Wpf/Services/`                | `SyncService`、`SyncSchedule`、`LanSyncService`、`LanDiscovery`、`LanSnapshotServer`、`LanSnapshotClient`、`LanAddress`、`TrayService`、`ThemeManager`、`WindowTheme`、`AutostartService`、`WindowStateStore`、`LegacyStorageMigration`、`StorageRelocationService`、`UpdateService`、`UpdateInstaller`、`MirrorContentService`（唯一 HTTP 层）、`AnnouncementService`、`AboutInfoService`、`MirrorsConfig` / `MirrorUrl` / `SourceConfig` / `RepoConfig` | 桌面生命周期、调度、局域网发现/快照交换、存储迁移、更新下载/替换与公开 Markdown 拉取 |
 | `wpf/TokenView.Wpf/Controls/`                | `RequestLineChart`（自绘折线）、`DailyStripPanel`（等宽逐日条布局）、`DateTimeRangePicker`（锚定浮层 + 自绘双月日历）、`MarkdownView`（Markdig AST → FlowDocument）                                                                                          | 可视组件；图表只绘制传入的数据点，不自行聚合；Markdown 不执行 HTML/脚本                       |
-| `wpf/TokenView.Wpf/Settings/`                | `AppSettings`（含 `AllClients`、`CloseBehavior`、`AppTheme`、`TokenDisplay`）、`SettingsStore`（`schemaVersion` 信封、原子保存、值归一化、顶层 `lastReadAnnouncementHash`）                                                                                    | `settings.json` 读写；与统计库分离                                                           |
+| `wpf/TokenView.Wpf/Settings/`                | `AppSettings`（含 `AllClients`、`CloseBehavior`、`AppTheme`、`TokenDisplay`、`LanSyncEnabled`、`DeviceName`、`DeviceId`）、`SettingsStore`（`schemaVersion` 信封、原子保存、值归一化、保留已有设备标识、顶层 `lastReadAnnouncementHash`）、`DeviceIdentity` | `settings.json` 读写与设备标识；与统计库分离                                                 |
 | `wpf/TokenView.Wpf/Assets/`                  | `app-icon.svg`（图标源）、`tokenview.ico`（`ApplicationIcon`，随构建输出）                                                                                                                                                                                  | 仅图标资源                                                                                   |
-| `wpf/TokenView.Probe/`                       | `Program.cs`：`copy` / `sync` / `totals` / `ledger` / `model` / `update` / `relocate` / `autostart` / `announcement` / `about-info`，引用 `TokenView.Wpf` 工程                                                                                                   | 无界面验证工具；口径回归与真实端点验证入口                                                   |
-| `wpf/TokenView.Tests/`                       | xUnit 测试：镜像顺序/降级、HTML 错误页、禁用源、时间戳、原始字节哈希、配置回落/合并、未读持久化、关于页一次性加载、`MarkdownView` 渲染（表格 / 链接 / 裸 HTML 当文本）、旧存储迁移 | 只用假 HTTP handler / `TimeProvider` 与临时目录，不访问网络、不依赖当前时间、不触碰真实 AppData   |
+| `wpf/TokenView.Probe/`                       | `Program.cs`：`copy` / `sync` / `totals` / `ledger` / `model` / `update` / `relocate` / `autostart` / `announcement` / `about-info` / `peer-export` / `peer-import` / `peer-totals` / `peer-roundtrip`，引用 `TokenView.Wpf` 工程 | 无界面验证工具；口径回归、真实端点与多设备快照验证入口 |
+| `wpf/TokenView.Tests/`                       | xUnit 测试：镜像顺序/降级、HTML 错误页、禁用源、时间戳、原始字节哈希、配置回落/合并、未读持久化、关于页一次性加载、`MarkdownView` 渲染（表格 / 链接 / 裸 HTML 当文本）、旧存储迁移、多设备快照序列化/导入/合并、回环 UDP/TCP 发现 | 只用假 HTTP handler / `TimeProvider`、回环套接字与临时目录，不访问真实网络或真实 AppData |
 | `scripts/reconcile_overview.py`            | 以只读 URI 打开生产库，按会话开始日聚合总量并与界面口径比对                                                                                                                                                                                               | 只读对账辅助，不参与构建                                                                     |
 
 ## 5. 采集器规范
@@ -168,15 +193,19 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
 - 表与迁移：`schema_migrations` 版本化，只追加不改已发布 SQL；当前 v1
   `initial_usage_schema`（`source_files` / `sessions` / `messages` 与索引）、v2 `request_rollup`
   （`request_hourly` / `request_hourly_sessions` / `usage_rollup_state`）、v3
-  `refresh_request_rollup_once`（强制一次重建）。迁移在 `UsageStore.Open` 内逐版本单事务执行，
+  `refresh_request_rollup_once`（强制一次重建）、v4 `multi_device_snapshots`
+  （`peer_devices` / `peer_request_daily` / `peer_request_hourly` / `peer_session_daily` /
+  `peer_session_hourly` 与索引）。迁移在 `UsageStore.Open` 内逐版本单事务执行，
   并回写 `PRAGMA user_version`。表结构字段含义见 `docs/data-model.md`。
 - 存储迁移（`StorageRelocationService.Relocate`）：只接受不含 `..` 的绝对目录；拒绝与任一采集器
   `SourcePaths` 重叠的目标；拒绝目标目录已存在 TokenView 自有文件；用 `VACUUM INTO` 生成含已提交
   WAL 的一致快照并对副本跑 `PRAGMA integrity_check`；成功后复制 `settings.json`、原子写定位文件，
   再清理旧目录中 TokenView 自有文件（清理失败只回警告）。任一步失败回滚目标文件并保留原位置与原数据。
 - 清除统计：在单个 `BEGIN IMMEDIATE` 事务内删除 `messages` / `sessions` / `source_files` /
-  `request_hourly` / `request_hourly_sessions` 并复位脏标记（领域侧对应 `UsageStore.ClearStatistics()`），
-  完成后自动暂停采集；不影响客户端原始数据。
+  `request_hourly` / `request_hourly_sessions` / `peer_devices`（级联 peer_*）并复位脏标记
+  （领域侧对应 `UsageStore.ClearStatistics()`），完成后自动暂停采集；不影响客户端原始数据。
+- 多设备：聚合快照只在内存生成并经 TCP 提供，不落盘；导入只写 `peer_*` 表，不写本机统计表；
+  `peer_devices` 可单独移除；设备列表与在线状态由 `LanSyncService` 合并内存 presence 与库内记录。
 - 费用：仅保留客户端自报值（`cost_source` / `client_cost_usd`），不做价格换算，界面不展示金额。
 
 ## 7. 桌面生命周期
@@ -184,6 +213,12 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
 - **单实例**：命名互斥体 `Local\TokenView.Wpf.SingleInstance`；重复启动通过
   `Local\TokenView.Wpf.Activate` 唤醒已有实例（后台监听线程 → `MainWindow.RestoreFromTray`）后退出，
   避免两个进程同时写库。
+- **局域网同步**：`App` 启动时若 `LanSyncEnabled`（默认 true）生成/读取设备标识并启动
+  `LanSyncService`；`LanDiscovery` 监听 UDP 17831 并每 5 秒广播，`LanSnapshotServer` 监听
+  TCP 17832（占用时回退到后续端口），只响应 `TOKENVIEW/1` 快照请求；发现设备后立即拉取，
+  此后每 60 秒刷新，10 分钟心跳重建本机快照；30 秒无广播标记离线但保留上次导入数据。
+  所有监听只接受私网/回环地址；关闭后释放端口、停止广播；退出时最多等待 3 秒。
+  设备标识保存在 `settings.json`，不随主题等即时保存被清空。
 - **托盘**：`TrayService`（WinForms `NotifyIcon`，故工程开启 `UseWindowsForms`）提供
   打开 TokenView / 立即同步 / 重启 TokenView / 退出，左键单击或双击托盘图标打开主窗口；采集中禁用"立即同步"并显示进行中；
   重启先拉起带 `--restart-wait <pid>` 的新实例，等待旧进程退出后接管，旧实例按正常退出流程等待同步完成；
@@ -235,6 +270,12 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   `LoadSessionDetail` 产出 `SessionDetailSnapshot`（全会话分项、总量依据、完整度、未知关系与
   请求明细分页，默认 100 条、上限 500 条）；`LoadClientStats` 与 `LoadTodaySummary` 供
   设置 · 采集诊断与托盘摘要。
+- 多设备查询：`Load` 增加 `DeviceSelection`（Local / All / Peer）与显式数据库路径重载；
+  All/Peer 从 `peer_*` 读请求、会话与估算，peer 设备以 `peer:<deviceId>` 伪客户端进入
+  `OverviewSnapshot.Clients` 与图表客户端切片；Token / 请求 / 估算相加，会话数改为区间或桶内
+  **开始的会话数**（`SessionsStartBased = true`），Local 模式保持原有“有请求的去重会话”口径；
+  模型排行、项目排行、最近会话与会话总账仍仅统计本机（`DetailsLocalOnly = true`）；
+  自定义范围带时分边界时其他设备按日聚合（`PeerGranularityDaily = true`），UI 必须标注。
 - 展示记录（`Models.cs`）是只读 `record`，携带已格式化的文本属性；Token 单位换算统一走
   `TokenFormatting`（`auto` / `chinese` / `k` / `m` / `b` / `exact`），窗口不手写单位逻辑。
 - 会话累计与请求口径是两条独立查询路径：`request_hourly` 统计有原生时间的请求计数（含估算请求），
@@ -311,6 +352,7 @@ dotnet publish wpf/TokenView.Wpf/TokenView.Wpf.csproj -c Release -r win-x64 --se
 
 | 日期       | 决策                                                                                    | 状态   | 理由 / 影响                                                                                                              |
 | ---------- | --------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
+| 2026-11-02 | 局域网多设备同步改为 UDP 广播发现 + TCP 聚合快照拉取，默认开启、可关闭 | 已采纳 | 每台电脑只导出本机 `request_hourly` / `sessions` / `messages` 的聚合快照（无会话正文、项目路径、会话标识），对端导入独立 `peer_*` 表并以 `peer:<deviceId>` 伪客户端参与图表/客户端分布；不读取对端数据库；UDP 17831 / TCP 17832（回退），只接受私网/回环；新增 v4 迁移与 LanSyncService，无新 NuGet、管理员权限或云服务 |
 | 2026-10-26 | Qoder 记录开关由服务层自动初始化 | 已采纳 | Qoder 采集开启时，在启动与同步前后台设置用户级及进程级 `QODER_EXPOSE_TOKEN_USAGE` / `QODERCN_EXPOSE_TOKEN_USAGE=true`；仅值变化时写入与广播，无弹窗、不重启 Qoder；采集器与 Probe 保持只读。失败保存脱敏诊断，不阻断已有数据采集；无新依赖、管理员权限或网络请求 |
 | 2026-10-20 | 更新改为「自动下载 + SHA-256 校验 + 用户确认重启安装」，发布走 GitHub Actions         | 已采纳 | 仅接受 `Autumn-one/TokenView` 的 HTTPS Release 资产；更新包必须带 `sha256`；独立 PowerShell 助手等待退出后备份、覆盖、重启，失败恢复旧文件；不静默覆盖运行中的程序 |
 | 2026-10-20 | 产品标识、程序集、命名空间与本地存储统一为 TokenView                                      | 已采纳 | 程序集 `TokenView.Wpf`；数据目录 `com.tokenview.app`、库 `tokenview-usage.sqlite3`；首次启动迁移旧版自有文件，失败回退旧布局；GitHub 仓库已迁移到 `Autumn-one/TokenView` |

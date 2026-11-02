@@ -33,6 +33,15 @@ public sealed class AboutInfoService
         return StartAsync(cancellationToken);
     }
 
+    public Task EnsureLoadedOrRetryAsync(CancellationToken cancellationToken = default)
+    {
+        if (Content is null && !IsFetching && HasAttempted)
+        {
+            return RetryAsync(cancellationToken);
+        }
+        return EnsureLoadedAsync(cancellationToken);
+    }
+
     public Task RetryAsync(CancellationToken cancellationToken = default)
     {
         HasAttempted = true;

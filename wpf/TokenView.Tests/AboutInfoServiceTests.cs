@@ -82,6 +82,60 @@ public sealed class AboutInfoServiceTests
         Assert.Equal("offline", service.Error);
     }
 
+    [Fact]
+    public async Task EnsureLoadedOrRetryRetriesAfterFailure()
+    {
+        var fetcher = new StubContentFetcher
+        {
+            OnFetch = _ => Task.FromResult(ContentFetchResult.Failure("offline", Now)),
+        };
+        var service = new AboutInfoService(fetcher);
+
+        await service.EnsureLoadedOrRetryAsync();
+        Assert.Equal(1, fetcher.Calls);
+        Assert.Equal("offline", service.Error);
+
+        fetcher.OnFetch = _ => Task.FromResult(Success("hash-1"));
+        await service.EnsureLoadedOrRetryAsync();
+
+        Assert.Equal(2, fetcher.Calls);
+        Assert.NotNull(service.Content);
+        Assert.Null(service.Error);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedOrRetryDoesNotRefetchAfterSuccess()
+    {
+        var fetcher = new StubContentFetcher
+        {
+            OnFetch = _ => Task.FromResult(Success("hash-1")),
+        };
+        var service = new AboutInfoService(fetcher);
+
+        await service.EnsureLoadedOrRetryAsync();
+        await service.EnsureLoadedOrRetryAsync();
+
+        Assert.Equal(1, fetcher.Calls);
+        Assert.NotNull(service.Content);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedOrRetryReusesInflightAttempt()
+    {
+        var gate = new TaskCompletionSource<ContentFetchResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetcher = new StubContentFetcher { OnFetch = _ => gate.Task };
+        var service = new AboutInfoService(fetcher);
+
+        var first = service.EnsureLoadedOrRetryAsync();
+        var second = service.EnsureLoadedOrRetryAsync();
+
+        Assert.Same(first, second);
+        Assert.Equal(1, fetcher.Calls);
+        gate.SetResult(Success("hash-1"));
+        await first;
+    }
+
     private static ContentFetchResult Success(string hash) =>
         ContentFetchResult.Ok(new MarkdownContent("# info", hash, "source", "https://source.test/info.md", Now));
 }
