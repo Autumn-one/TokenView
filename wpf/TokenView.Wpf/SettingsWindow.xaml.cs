@@ -4,7 +4,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using Microsoft.Data.Sqlite;
 using TokenView.Wpf.Data;
 using TokenView.Wpf.Data.Collectors;
 using TokenView.Wpf.Data.Peers;
@@ -724,7 +723,7 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void ClearStatistics_Click(object sender, RoutedEventArgs e)
+    private async void ClearStatistics_Click(object sender, RoutedEventArgs e)
     {
         if (SyncService.Current.IsRunning)
         {
@@ -733,45 +732,35 @@ public partial class SettingsWindow : Window
             return;
         }
         if (MessageBox.Show(this,
-                "确定清除 TokenView 的全部统计数据吗？客户端原始会话文件不会被修改。",
+                "确定清除 TokenView 的全部统计数据吗？采集将暂停，局域网同步将关闭。客户端原始会话文件不会被修改。",
                 "清除统计数据", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
         {
             return;
         }
         try
         {
-            using var connection = new SqliteConnection(
-                new SqliteConnectionStringBuilder
-                {
-                    DataSource = TokenViewDatabase.DatabasePath,
-                    Mode = SqliteOpenMode.ReadWrite,
-                    Pooling = false,
-                }.ToString());
-            connection.Open();
-            using var command = connection.CreateCommand();
-            command.CommandText = """
-                PRAGMA busy_timeout = 5000;
-                BEGIN IMMEDIATE;
-                DELETE FROM messages;
-                DELETE FROM sessions;
-                DELETE FROM source_files;
-                DELETE FROM request_hourly;
-                DELETE FROM request_hourly_sessions;
-                UPDATE usage_rollup_state SET request_dirty = 0 WHERE id = 1;
-                COMMIT;
-                """;
-            command.ExecuteNonQuery();
-            _settings.CollectionPaused = true;
-            SettingsStore.Save(_settings);
+            IsEnabled = false;
+            await SyncService.Current.ClearStatisticsAsync(TokenViewDatabase.DatabasePath, () =>
+            {
+                _settings.CollectionPaused = true;
+                _settings.LanSyncEnabled = false;
+                SettingsStore.Save(_settings);
+            }, LanSyncService.Current);
             _loading = true;
-            PausedCheck.IsChecked = true;
+            Populate();
             _loading = false;
-            MessageBox.Show(this, "统计数据已清除，采集已暂停。", "TokenView", MessageBoxButton.OK,
+            MessageBox.Show(this, "统计数据已清除，采集已暂停，局域网同步已关闭。", "TokenView", MessageBoxButton.OK,
                 MessageBoxImage.Information);
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "TokenView", MessageBoxButton.OK, MessageBoxImage.Warning);
+            _settings = SettingsStore.Load();
+            MessageBox.Show(this, "清除统计失败，请检查存储权限后重试（" + error.GetType().Name + "）。",
+                "TokenView", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            IsEnabled = true;
         }
     }
 

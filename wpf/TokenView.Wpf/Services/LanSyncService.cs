@@ -230,6 +230,13 @@ public sealed class LanSyncService
         RaiseStatus();
     }
 
+    internal async Task StopAndDrainAsync()
+    {
+        await Task.Run(Stop);
+        await _exchangeGate.WaitAsync();
+        _exchangeGate.Release();
+    }
+
     public void NotifyPeersChanged()
     {
         PeersChanged?.Invoke();
@@ -359,6 +366,7 @@ public sealed class LanSyncService
             }
             var document = await LanSnapshotClient.FetchAsync(peer.Address, peer.TcpPort,
                 options.DeviceId, FetchTimeout, cancellationToken);
+            if (!IsRunning || cancellationToken.IsCancellationRequested) return;
             if (string.Equals(document.DeviceId, options.DeviceId, StringComparison.Ordinal))
             {
                 return;

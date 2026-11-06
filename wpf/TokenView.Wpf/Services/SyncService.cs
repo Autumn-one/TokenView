@@ -11,6 +11,7 @@ public sealed class SyncService
     public static SyncService Current { get; } = new();
 
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private int _pendingClear;
 
     public event Action<SyncProgress>? Progress;
     public event Action<SyncBatch?, string?>? Completed;
@@ -32,7 +33,13 @@ public sealed class SyncService
 
     public bool TryStart(IReadOnlyCollection<string> clients, bool force)
     {
+        if (Volatile.Read(ref _pendingClear) != 0) return false;
         if (!_gate.Wait(0)) return false;
+        if (Volatile.Read(ref _pendingClear) != 0)
+        {
+            _gate.Release();
+            return false;
+        }
         IsRunning = true;
         StartedAtMs = UsageTime.NowMs();
         HardError = null;
@@ -72,5 +79,38 @@ public sealed class SyncService
             }
         });
         return true;
+    }
+
+    public async Task ClearStatisticsAsync(string databasePath, Action pauseAndSave, LanSyncService lan)
+    {
+        Interlocked.Increment(ref _pendingClear);
+        try
+        {
+            // 先保存暂停与禁用局域网，即使此后退出也不会在重启时重新填充统计。
+            pauseAndSave();
+            await _gate.WaitAsync();
+            try
+            {
+                await lan.StopAndDrainAsync();
+                await Task.Run(() =>
+                {
+                    using var store = UsageStore.Open(databasePath);
+                    store.ClearStatistics();
+                });
+                LastBatch = null;
+                LastResults.Clear();
+                HardError = null;
+                lan.NotifyPeersChanged();
+                Completed?.Invoke(null, null);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingClear);
+        }
     }
 }
