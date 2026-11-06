@@ -9,6 +9,44 @@ namespace TokenView.Tests;
 
 public sealed class UpdateServiceTests
 {
+    [Theory]
+    [InlineData("https://github.com/other/TokenView/releases/download/v99/a.zip")]
+    [InlineData("https://github.com/Autumn-one/other/releases/download/v99/a.zip")]
+    [InlineData("https://github.com/Autumn-one/TokenView/other/releases/download/v99/a.zip")]
+    [InlineData("https://github.com/Autumn-one/TokenView/releases/download/")]
+    [InlineData("https://github.com:444/Autumn-one/TokenView/releases/download/v99/a.zip")]
+    [InlineData("https://user@github.com/Autumn-one/TokenView/releases/download/v99/a.zip")]
+    [InlineData("http://github.com/Autumn-one/TokenView/releases/download/v99/a.zip")]
+    public async Task RejectsUntrustedRepositoryBeforeAnyRequest(string url)
+    {
+        var calls = 0;
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+        {
+            calls++;
+            return StubHttpHandler.Bytes([1]);
+        }));
+        var info = new UpdateInfo("99.0.0", null, url, new string('a', 64));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => UpdateService.DownloadAsync(info,
+            "unused.zip", client, null, CancellationToken.None));
+        Assert.Equal(0, calls);
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            version = "99.0.0",
+            platforms = new Dictionary<string, object> { ["windows-x86_64"] = new { url, sha256 = info.Sha256 } },
+        });
+        Assert.Throws<InvalidDataException>(() => UpdateService.Parse(json));
+    }
+
+    [Theory]
+    [InlineData("abc123")]
+    [InlineData("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
+    public async Task RejectsMalformedHashBeforeAnyRequest(string hash)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ => throw new Exception("unexpected HTTP")));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => UpdateService.DownloadAsync(
+            new UpdateInfo("99.0.0", null, DownloadUrl, hash), "unused.zip", client, null, CancellationToken.None));
+    }
+
     private const string DownloadUrl =
         "https://github.com/Autumn-one/TokenView/releases/download/v99.0.0/TokenView-99.0.0-win-x64.zip";
 
@@ -22,7 +60,7 @@ public sealed class UpdateServiceTests
               "platforms": {
                 "windows-x86_64": {
                   "url": "{{DownloadUrl}}",
-                  "sha256": "abc123"
+                  "sha256": "{{new string('a', 64)}}"
                 }
               }
             }
@@ -34,7 +72,7 @@ public sealed class UpdateServiceTests
         Assert.Equal("99.0.0", info!.Version);
         Assert.Equal("fixes", info.Notes);
         Assert.Equal(DownloadUrl, info.DownloadUrl);
-        Assert.Equal("abc123", info.Sha256);
+        Assert.Equal(new string('a', 64), info.Sha256);
     }
 
     [Fact]

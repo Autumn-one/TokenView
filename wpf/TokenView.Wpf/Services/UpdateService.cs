@@ -61,6 +61,10 @@ public static class UpdateService
             }
         }
         var notes = root.TryGetProperty("notes", out var notesValue) ? notesValue.GetString() : null;
+        if (download is not null && !IsAllowedDownloadUrl(download))
+            throw new InvalidDataException("更新地址不在允许的 TokenView GitHub Release 范围内");
+        if (sha256 is not null && !IsValidSha256(sha256))
+            throw new InvalidDataException("更新包 SHA-256 格式无效");
         return new UpdateInfo(latest, notes, download, sha256);
     }
 
@@ -78,9 +82,9 @@ public static class UpdateService
         {
             throw new InvalidOperationException("更新地址不在允许的 GitHub Release 范围内");
         }
-        if (string.IsNullOrWhiteSpace(info.Sha256))
+        if (!IsValidSha256(info.Sha256))
         {
-            throw new InvalidOperationException("更新包缺少 SHA-256 校验值");
+            throw new InvalidOperationException("更新包缺少有效的 SHA-256 校验值");
         }
 
         client.DefaultRequestHeaders.UserAgent.ParseAdd($"TokenView/{CurrentVersion}");
@@ -110,7 +114,7 @@ public static class UpdateService
         }
 
         var actual = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
-        if (!string.Equals(actual, info.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(actual, info.Sha256!.Trim(), StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(targetPath);
             throw new InvalidDataException("更新包 SHA-256 校验失败");
@@ -121,7 +125,14 @@ public static class UpdateService
     {
         return Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
                uri.Scheme == Uri.UriSchemeHttps &&
+               uri.IsDefaultPort && string.IsNullOrEmpty(uri.UserInfo) &&
+               string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment) &&
                string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
-               uri.AbsolutePath.Contains("/releases/download/", StringComparison.Ordinal);
+               uri.AbsolutePath.StartsWith("/Autumn-one/TokenView/releases/download/", StringComparison.Ordinal) &&
+               uri.Segments.Length == 7 &&
+               uri.Segments[5].Length > 1 && uri.Segments[6].Length > 0;
     }
+
+    private static bool IsValidSha256(string? value) =>
+        value?.Trim() is { Length: 64 } hash && hash.All(Uri.IsHexDigit);
 }

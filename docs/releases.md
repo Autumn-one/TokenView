@@ -72,7 +72,7 @@ https://github.com/Autumn-one/TokenView/releases/latest/download/latest.json
 - 开启“自动检查并下载更新（最多每天一次）”后，应用按 `settings.json` 的 `lastUpdateCheckMs`
   限制每天最多检查一次；命中新版本会后台下载、校验并在托盘提示，点击气泡后重启安装。
 - 更新包只接受 `github.com/Autumn-one/TokenView/releases/download/` 下的 HTTPS 地址；
-  `sha256` 缺失或校验失败时拒绝安装。
+  清单解析与下载均验证同仓库地址，拒绝非默认端口、用户信息、查询或片段；`sha256` 必须为 64 位十六进制，缺失、格式错误或校验失败时拒绝安装。GitHub 自身的 Release CDN 跳转保留。
 - 替换由临时 PowerShell 助手在进程退出后执行：先备份当前程序文件，覆盖失败时恢复并重启旧版本。
 - 不静默覆盖正在运行的程序；只有用户点击“重启并更新”或托盘气泡才会退出并替换。
 - 默认不联网。已登记的联网入口只有更新检查/下载（手动或每天最多一次）、公告/关于 Markdown
