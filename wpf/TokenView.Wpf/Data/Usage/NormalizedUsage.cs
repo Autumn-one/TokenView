@@ -43,13 +43,15 @@ public readonly record struct TokenBuckets(
 {
     public long? SumWith(TokenSemantics semantics)
     {
+        // IncludedIn 细分缺失时 Normalize 保留完整父桶；总量已知，但细分仍为 NULL。
         long total = 0;
         foreach (var (value, required) in new[]
                  {
                      (Input, true),
                      (Output, true),
-                     (Reasoning, semantics.Reasoning != FieldRelation.NotProvided),
-                     (CacheRead, true),
+                     (Reasoning, semantics.Reasoning != FieldRelation.NotProvided &&
+                                 !(semantics.Reasoning == FieldRelation.IncludedIn && Reasoning is null)),
+                     (CacheRead, !(semantics.CacheRead == FieldRelation.IncludedIn && CacheRead is null)),
                      (CacheWrite, semantics.CacheWriteCountsInTotal),
                  })
         {

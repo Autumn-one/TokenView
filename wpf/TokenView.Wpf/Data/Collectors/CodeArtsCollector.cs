@@ -8,7 +8,7 @@ namespace TokenView.Wpf.Data.Collectors;
 public sealed class CodeArtsCollector : IClientCollector
 {
     private const string Client = "codearts";
-    private const int ParserVersion = 1;
+    private const int ParserVersion = 2;
 
     private readonly string? _root;
 
@@ -258,6 +258,7 @@ public sealed class CodeArtsCollector : IClientCollector
 
     private static long? SumKnownCached(IReadOnlyList<RawTokenCounts> counts)
     {
+        if (counts.Count == 0) return null;
         long total = 0;
         foreach (var count in counts)
         {

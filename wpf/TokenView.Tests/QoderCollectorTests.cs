@@ -48,7 +48,7 @@ public sealed class QoderCollectorTests
         Assert.Equal(3, report.MessagesInserted);
         Assert.Equal(0, report.UnparsedLines);
         Assert.Equal(3, temp.MessageCount());
-        Assert.Equal(4, parserVersion);
+        Assert.Equal(5, parserVersion);
 
         var totals = temp.MessageTotals();
         Assert.Equal(120, totals["message:m1"]);
@@ -240,7 +240,7 @@ public sealed class QoderCollectorTests
         store.RebuildRequestRollup();
 
         Assert.Equal(1, report.FilesParsed);
-        Assert.Equal(4, temp.ParserVersion());
+        Assert.Equal(5, temp.ParserVersion());
         Assert.Equal(1, temp.MessageCount());
         Assert.Equal(220, temp.MessageTotals()["request:sdk-request"]);
         Assert.Equal((1L, 1L, 0L, 220L), temp.Rollup());

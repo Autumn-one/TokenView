@@ -13,7 +13,7 @@ namespace TokenView.Wpf.Data.Collectors;
 public sealed class QoderCollector : IClientCollector
 {
     private const string Client = "qoder";
-    private const long ParserVersion = 4;
+    private const long ParserVersion = 5;
 
     private readonly IReadOnlyList<string> _cliRoots;
     private readonly IReadOnlyList<string> _databases;
