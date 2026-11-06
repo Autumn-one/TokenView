@@ -103,6 +103,7 @@ public sealed record MessageRecord
 public sealed record ImportSummary
 {
     public UpsertOutcome? Session { get; init; }
+    public int SessionsSkippedStale { get; set; }
     public int MessagesInserted { get; set; }
     public int MessagesUpdated { get; set; }
     public int MessagesSkippedStale { get; set; }

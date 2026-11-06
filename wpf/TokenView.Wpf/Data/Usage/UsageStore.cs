@@ -206,6 +206,10 @@ public sealed class UsageStore : IDisposable
 
         using var transaction = _connection.BeginTransaction();
         var pruned = 0;
+        var hadHistory = Convert.ToInt64(Scalar(transaction,
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE client = $client) OR " +
+            "EXISTS(SELECT 1 FROM source_files WHERE client = $client)", ("$client", client)),
+            CultureInfo.InvariantCulture) != 0;
         if (pruneMissing)
         {
             pruned = Convert.ToInt32(Scalar(transaction,
@@ -215,9 +219,22 @@ public sealed class UsageStore : IDisposable
         }
 
         var sources = new Dictionary<string, long>(StringComparer.Ordinal);
+        var newSources = new HashSet<string>(StringComparer.Ordinal);
         foreach (var file in files)
         {
-            sources[Path.GetFullPath(file.Path)] = UpsertSourceFile(transaction, file);
+            var path = Path.GetFullPath(file.Path);
+            var existing = Scalar(transaction,
+                "SELECT id FROM source_files WHERE client = $client AND path = $path",
+                ("$client", client), ("$path", file.Path));
+            if (existing is null or DBNull)
+            {
+                sources[path] = UpsertSourceFile(transaction, file);
+                newSources.Add(path);
+            }
+            else
+            {
+                sources[path] = Convert.ToInt64(existing, CultureInfo.InvariantCulture);
+            }
         }
 
         // 每条消息都要回填 source_file_id；按原始路径缓存，避免逐条规范化字符串。
@@ -231,6 +248,7 @@ public sealed class UsageStore : IDisposable
         }
 
         var ids = new HashSet<string>(StringComparer.Ordinal);
+        var staleSources = new HashSet<string>(StringComparer.Ordinal);
         var summary = new ImportSummary { MessagesPruned = pruned };
         foreach (var entry in sessions)
         {
@@ -246,18 +264,24 @@ public sealed class UsageStore : IDisposable
                                               message.ClientSessionId != entry.Session.ClientSessionId))
                 throw new ArgumentException("snapshot message belongs to another session");
 
+            var outcome = UpsertSession(transaction, entry.Session);
+            summary = summary with { Session = outcome };
+            if (outcome == UpsertOutcome.SkippedStale)
+            {
+                summary.SessionsSkippedStale++;
+                summary.MessagesSkippedStale += entry.Messages.Count;
+                staleSources.Add(Path.GetFullPath(entry.SourcePath));
+                foreach (var path in entry.MessageSourcePaths.Values)
+                    staleSources.Add(Path.GetFullPath(path));
+                continue;
+            }
             if (!pruneMissing)
             {
-                pruned += Convert.ToInt32(Scalar(transaction,
-                    "SELECT COUNT(*) FROM messages WHERE client = $client AND session_id = $session",
-                    ("$client", client),
-                    ("$session", UsageIds.SessionId(client, entry.Session.ClientSessionId))), CultureInfo.InvariantCulture);
-                Execute(transaction,
-                    "DELETE FROM sessions WHERE client = $client AND client_session_id = $session",
-                    ("$client", client), ("$session", entry.Session.ClientSessionId));
+                pruned += Execute(transaction,
+                    "DELETE FROM messages WHERE client = $client AND session_id = $session",
+                    ("$client", client), ("$session", UsageIds.SessionId(client, entry.Session.ClientSessionId)));
             }
 
-            summary = summary with { Session = UpsertSession(transaction, entry.Session) };
             foreach (var message in entry.Messages)
             {
                 var sourcePath = entry.MessageSourcePaths.TryGetValue(message.DedupKey, out var mapped)
@@ -268,11 +292,23 @@ public sealed class UsageStore : IDisposable
             }
         }
 
+        // 空结果无法区分源被清理与格式漂移；事务回滚同时保留历史和可重试水位。
+        if (pruneMissing && ids.Count == 0 && hadHistory)
+            throw new InvalidDataException("本轮未解析出会话，已保留历史统计和扫描水位；请检查数据源后重试");
+
         // 采集器可能把解析移进会话流（惰性产出），并在产出过程中更新 UnparsedRecords。
         // 因此会话流结束后按最新值再写一次水印，保证 source_files 与上报计数一致；
         // 消息的 source_file_id 仍用首次写入拿到的 id（路径唯一，id 不变）。
         foreach (var file in files)
         {
+            var path = Path.GetFullPath(file.Path);
+            if (staleSources.Contains(path))
+            {
+                if (newSources.Contains(path))
+                    Execute(transaction, "UPDATE source_files SET parser_version = 0 WHERE id = $id",
+                        ("$id", sources[path]));
+                continue;
+            }
             UpsertSourceFile(transaction, file);
         }
 

@@ -143,7 +143,9 @@ public sealed class DshCollector : IClientCollector
             throw SyncException.Store(error);
         }
 
-        report.SessionsImported = sessions.Count;
+        report.SessionsImported = sessions.Count - imported.SessionsSkippedStale;
+        report.SessionsSkippedStale = imported.SessionsSkippedStale;
+        report.MessagesSkippedStale = imported.MessagesSkippedStale;
         report.MessagesInserted = imported.MessagesInserted;
         report.MessagesPruned = imported.MessagesPruned;
         return report;

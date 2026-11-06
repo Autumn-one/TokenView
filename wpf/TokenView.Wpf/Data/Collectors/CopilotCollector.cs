@@ -219,7 +219,9 @@ public sealed class CopilotCollector : IClientCollector
         report.FilesSeen = sources.Count;
         report.FilesParsed = sources.Count;
         report.UnparsedLines = unparsed;
-        report.SessionsImported = sessions.Count;
+        report.SessionsImported = sessions.Count - imported.SessionsSkippedStale;
+        report.SessionsSkippedStale = imported.SessionsSkippedStale;
+        report.MessagesSkippedStale = imported.MessagesSkippedStale;
         report.MessagesInserted = imported.MessagesInserted;
         report.MessagesPruned = imported.MessagesPruned;
         return report;
