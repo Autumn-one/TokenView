@@ -10,7 +10,7 @@ namespace TokenView.Wpf.Data.Collectors;
 public sealed class CodexCollector : IClientCollector
 {
     private const string Client = "codex";
-    private const long ParserVersion = 2;
+    private const long ParserVersion = 3;
 
     private readonly string? _root;
 
@@ -269,7 +269,7 @@ public sealed class CodexCollector : IClientCollector
     private static ParsedFile? ParseFile(string path, long size, long mtime)
     {
         var parsed = new ParsedFile(path, size, mtime);
-        var newRecords = new List<MessageRecord>();
+        var newRecords = new List<CodexUsageRecord>();
         var legacyEvents = new List<LegacyEvent>();
         var lineNumber = 0;
         try
@@ -346,7 +346,7 @@ public sealed class CodexCollector : IClientCollector
     }
 
     private static void ParseTokenUsageRecord(ParsedFile parsed, JsonElement value, int line,
-        List<MessageRecord> records)
+        List<CodexUsageRecord> records)
     {
         var payload = value.Element("payload");
         var timestamp = LineTimestamp(value);
@@ -362,7 +362,7 @@ public sealed class CodexCollector : IClientCollector
         var cumulative = payload is { } element && element.Element("thread_token_usage") is { } threadUsage
             ? ReadCounts(threadUsage)
             : (RawTokenCounts?)null;
-        records.Add(CreateMessage(new CodexUsageRecord(
+        records.Add(new CodexUsageRecord(
             threadId,
             PayloadString(payload, "response_id"),
             ordinal,
@@ -370,7 +370,7 @@ public sealed class CodexCollector : IClientCollector
             parsed.Path,
             line,
             timestamp,
-            ReadCounts(payload is { } usagePayload ? usagePayload.Element("usage") : null))));
+            ReadCounts(payload is { } usagePayload ? usagePayload.Element("usage") : null)));
         if (cumulative is { } latest) parsed.NewCumulative = latest;
     }
 
@@ -402,27 +402,22 @@ public sealed class CodexCollector : IClientCollector
     }
 
     /// <summary>旧格式镜像事件与新格式配对后丢弃，只保留旧格式前缀。</summary>
-    private static void ResolveMessages(ParsedFile parsed, List<MessageRecord> newRecords,
+    private static void ResolveMessages(ParsedFile parsed, List<CodexUsageRecord> newRecords,
         List<LegacyEvent> legacyEvents)
     {
-        var mirrorIndex = 0;
+        // 新格式覆盖开始后的窗口以请求记录为准；压缩后的镜像用量并不等于原请求。
+        // 不靠数值相等猜测身份，也不让一次不匹配使后续全部重复。
+        var firstNewLine = newRecords.Count > 0 ? newRecords[0].Line : int.MaxValue;
         var seenLegacy = new HashSet<string>(StringComparer.Ordinal);
         foreach (var legacy in legacyEvents)
         {
             var record = new CodexUsageRecord(legacy.ThreadId, null, legacy.Ordinal, legacy.Cumulative,
                 parsed.Path, legacy.Line, legacy.Timestamp, legacy.Usage);
             if (legacy.Ordinal is null && !seenLegacy.Add(DedupKey(record))) continue;
-            var isMirror = mirrorIndex < newRecords.Count &&
-                           legacy.Usage.ClientTotal is { } total &&
-                           newRecords[mirrorIndex].Usage.TotalTokens == total;
-            if (isMirror)
-            {
-                mirrorIndex++;
-                continue;
-            }
+            if (legacy.Line >= firstNewLine) continue;
             parsed.Messages.Add(CreateMessage(record));
         }
-        parsed.Messages.AddRange(newRecords);
+        parsed.Messages.AddRange(newRecords.Select(CreateMessage));
         // 无原生序号的记录按去重键只保留首次观测；有 ordinal 的记录不需要在此去重。
         var seen = new HashSet<string>(StringComparer.Ordinal);
         parsed.Messages.RemoveAll(message => message.Seq is null && !seen.Add(message.DedupKey));
