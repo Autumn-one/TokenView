@@ -38,6 +38,10 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
         .Build();
 
     private static readonly FontFamily MonoFont = new("Cascadia Mono, Consolas, Microsoft YaHei UI");
+    private const int MaxDepth = 32;
+    private const int MaxNodes = 10_000;
+    private const int MaxMarkdownLength = 512 * 1024;
+    private const int MaxFallbackLength = 64 * 1024;
 
     public MarkdownView()
     {
@@ -70,16 +74,57 @@ public sealed class MarkdownView : FlowDocumentScrollViewer
         };
         document.SetResourceReference(TextElement.ForegroundProperty, "TextBrush");
 
-        var parsed = Markdig.Markdown.Parse(markdown, Pipeline);
-        foreach (var block in parsed)
+        try
         {
-            AddBlock(document.Blocks, block, document);
+            if (markdown.Length > MaxMarkdownLength)
+                throw new ArgumentException("Markdown exceeds rendering limit");
+            var parsed = Markdig.Markdown.Parse(markdown, Pipeline);
+            ValidateTree(parsed);
+            foreach (var block in parsed)
+            {
+                AddBlock(document.Blocks, block, document);
+            }
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+        {
+            document.Blocks.Clear();
+            document.Blocks.Add(new Paragraph(new Run("内容格式异常或过于复杂，已按纯文本显示。")));
+            document.Blocks.Add(new Paragraph(new Run(markdown[..Math.Min(markdown.Length, MaxFallbackLength)])));
+            if (markdown.Length > MaxFallbackLength)
+                document.Blocks.Add(new Paragraph(new Run("内容过长，已截断。")));
         }
         if (document.Blocks.Count == 0)
         {
             document.Blocks.Add(new Paragraph());
         }
         return document;
+    }
+
+    // 先迭代检查整棵树，再进入 WPF 递归渲染；链接标签的 FlattenText 也受同一深度限制。
+    private static void ValidateTree(MarkdownDocument document)
+    {
+        var pending = new Stack<(MarkdownObject Node, int Depth)>();
+        pending.Push((document, 0));
+        var count = 0;
+        while (pending.TryPop(out var entry))
+        {
+            if (++count > MaxNodes || entry.Depth > MaxDepth)
+                throw new ArgumentException("Markdown tree exceeds rendering limit");
+            switch (entry.Node)
+            {
+                case ContainerBlock blocks:
+                    foreach (var child in blocks) pending.Push((child, entry.Depth + 1));
+                    break;
+                case LeafBlock { Inline: { } inline }:
+                    pending.Push((inline, entry.Depth + 1));
+                    break;
+                case ContainerInline inlines:
+                    foreach (var child in inlines) pending.Push((child, entry.Depth + 1));
+                    break;
+            }
+            if (pending.Count > MaxNodes)
+                throw new ArgumentException("Markdown tree exceeds rendering limit");
+        }
     }
 
     private static void AddBlock(BlockCollection target, MdBlock block, FlowDocument document)

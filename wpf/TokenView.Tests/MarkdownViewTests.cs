@@ -7,6 +7,43 @@ namespace TokenView.Tests;
 
 public sealed class MarkdownViewTests
 {
+    [Theory]
+    [InlineData("quote")]
+    [InlineData("table")]
+    [InlineData("image")]
+    [InlineData("oversize")]
+    public void ComplexContentFallsBackToBoundedPlainText(string shape)
+    {
+        var markdown = shape switch
+        {
+            "quote" => string.Concat(Enumerable.Repeat("> ", 128)) + "text",
+            "table" => "|" + string.Concat(Enumerable.Repeat(" h |", 100)) + "\n|" +
+                       string.Concat(Enumerable.Repeat("---|", 100)) + "\n" +
+                       string.Concat(Enumerable.Repeat("|" + string.Concat(Enumerable.Repeat(" v |", 100)) + "\n", 100)),
+            "image" => string.Concat(Enumerable.Repeat("![", 5_000)) + "alt" +
+                       string.Concat(Enumerable.Repeat("](x)", 5_000)),
+            _ => new string('x', 600_000),
+        };
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var view = new MarkdownView { Markdown = markdown };
+                var text = new TextRange(view.Document.ContentStart, view.Document.ContentEnd).Text;
+                Assert.Contains("已按纯文本显示", text);
+                Assert.True(text.Length < 66_000);
+                view.Markdown = "# recovered";
+                Assert.Contains("recovered", Flatten(view.Document));
+            }
+            catch (Exception error) { failure = error; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(20)));
+        if (failure is not null) throw failure;
+    }
+
     [Fact]
     public void RendersTablesLinksAndRawHtml()
     {
