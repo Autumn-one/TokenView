@@ -121,8 +121,8 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   水位保留扫描开始指纹（下次必然重解析），不整客户端中止；详见 `data-metrics.md` 口径 2.18。
 - **原子快照替换**：完整扫描成功后调用 `UsageStore.ReplaceClientSnapshot(client, files, sessions)`，
   在单事务内删除该客户端全部 `sessions` / `messages` / `source_files` 再整体写入，使源数据的
-  修正、截断与删除能反映到统计中。部分文件失败时用 `MergeClientSnapshot`（仅 Copilot / DSH）
-  只替换成功会话、保留失败文件水位。Codex 走逐文件增量：`ReplaceFileImport` 按来源文件覆盖重写。
+  修正、截断与删除能反映到统计中；已有历史/水位时零会话结果回滚报错，避免格式漂移清空历史。部分文件失败时用 `MergeClientSnapshot`（仅 Copilot / DSH）
+  先判断会话陈旧，只替换接受会话的消息，保留失败或陈旧来源水位。Codex 走逐文件增量：`ReplaceFileImport` 按来源文件覆盖重写。
 - **幂等**：`sessions` 以 `(client, client_session_id)` 去重，`messages` 以
   `(client, session_id, dedup_key)` 去重；重复扫描只更新不翻倍。陈旧保护在
   `UsageStore.ShouldReplaceSession` / `UpsertMessage`：`client_cumulative` 总量不回退，
@@ -203,7 +203,7 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   再清理旧目录中 TokenView 自有文件（清理失败只回警告）。任一步失败回滚目标文件并保留原位置与原数据。
 - 清除统计：在单个 `BEGIN IMMEDIATE` 事务内删除 `messages` / `sessions` / `source_files` /
   `request_hourly` / `request_hourly_sessions` / `peer_devices`（级联 peer_*）并复位脏标记
-  （领域侧对应 `UsageStore.ClearStatistics()`），完成后自动暂停采集；不影响客户端原始数据。
+  （领域侧对应 `UsageStore.ClearStatistics()`）。`SyncService.ClearStatisticsAsync` 先保存暂停采集/关闭 LAN，阻止新批次并等待在途采集与 peer 交换结束，再后台删除；保存失败不删。不影响客户端原始数据。
 - 多设备：聚合快照只在内存生成并经 TCP 提供，不落盘；导入只写 `peer_*` 表，不写本机统计表；
   `peer_devices` 可单独移除；设备列表与在线状态由 `LanSyncService` 合并内存 presence 与库内记录。
 - 费用：仅保留客户端自报值（`cost_source` / `client_cost_usd`），不做价格换算，界面不展示金额。
@@ -259,7 +259,7 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   正文上限 512 KiB，返回 HTML 视为无效源继续降级。内容哈希取原始字节 SHA-256，
   `settings.json` 只持久化 `lastReadAnnouncementHash`（`AnnouncementWindow` 可见且停留 2 秒后写入），
   Markdown 正文不进磁盘、不进日志；`MarkdownView` 把 Markdig AST 渲染为 `FlowDocument`，
-  HTML 只当文本、图片只渲染为链接、外部链接交给系统浏览器。
+  HTML 只当文本、图片只渲染为链接、外部链接交给系统浏览器。解析/渲染异常或超限降级为最多 64 Ki 字符的纯文本；渲染前迭代检查 AST（深度 32、节点 10,000），输入最多 512 Ki 字符。
 
 ## 8. 查询与展示契约
 
@@ -275,16 +275,17 @@ Data：UsageStore ──→ Usage（UsageModels / NormalizedUsage / TokenSemanti
   `OverviewSnapshot.Clients` 与图表客户端切片；Token / 请求 / 估算相加，会话数改为区间或桶内
   **开始的会话数**（`SessionsStartBased = true`），Local 模式保持原有“有请求的去重会话”口径；
   模型排行、项目排行、最近会话与会话总账仍仅统计本机（`DetailsLocalOnly = true`）；
-  自定义范围带时分边界时其他设备按日聚合（`PeerGranularityDaily = true`），UI 必须标注。
+  自定义范围带时分边界时其他设备按对方本地日历日期整日计入（`PeerGranularityDaily = true`），UI 必须标注；请求与会话的首尾日共用日界映射。
 - 展示记录（`Models.cs`）是只读 `record`，携带已格式化的文本属性；Token 单位换算统一走
   `TokenFormatting`（`auto` / `chinese` / `k` / `m` / `b` / `exact`），窗口不手写单位逻辑。
 - 会话累计与请求口径是两条独立查询路径：`request_hourly` 统计有原生时间的请求计数（含估算请求），
   但估算请求的 Token 列写 0 并计入 `requests_without_usage`，不进入实测合计；会话总量仍取
   `sessions.total_tokens`（含 estimated 会话，UI 单列展示），界面不得把两者混成同一个数字。
+- 精确范围：完整 UTC 小时复用请求预聚合，边界回查明细；非整小时偏移时区从明细重新分桶。会话去重同样精确裁剪边界，托盘/总账今日值共用请求范围投影。
 - 时间与单位：跨层与库内使用 Unix 毫秒（`UsageTime.NowMs` / `ParseIso8601UtcMs`），
   展示按本地时区；Token 分桶字段名表达单位，缺失显示 `—`。
 - 诊断输出（状态浮层、脱敏诊断摘要）只含版本、客户端、状态、时间与计数，
-  不含会话标识、项目路径或错误原文。
+  不含会话标识、项目路径或错误原文。`Services/CollectionDiagnostics` 只接收来源计数与结构化扫描结果，拒绝复制任意错误字符串。
 
 ## 9. 错误处理与可观测性
 

@@ -66,7 +66,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 1. 客户端提供总量时（Codex、OpenCode、MiMoCode、Pi Desktop、WorkBuddy、Gemini CLI、Grok CLI）直接采用客户端值（`total_basis = client_reported`），
    并与分桶求和做一致性校验，不一致时置 `client_total_mismatch = 1`，不静默修正。
 2. 原始记录未提供总量时（例如 Claude Code / DSH / Kimi Code / MCode / Devin）由完整必需分桶求和得出（`total_basis = derived_from_buckets`）；MCode 仅在 reasoning 明确为 0 时可换算总量，Devin 的 input / output / cache_read 为必需分桶、cache_write 在客户端发送显式 JSON null 时按 0 计。
-3. 必需分桶缺失（NULL）时总量为 `NULL`（`total_basis = unavailable`）并记录未知项，**不把缺失当 0**。
+3. 必需分桶缺失（NULL）时总量为 `NULL`（`total_basis = unavailable`）并记录未知项，**不把缺失当 0**。例外是 `IncludedIn` 细分缺失而父桶仍完整：父桶可用于确定总量，细分仍为 NULL（口径 2.23）。
 4. `cache_write` 是否计入总量由口径决定：Codex/OpenCode 的客户端总量本身不含它，故不计入且标注未知；
    Claude Code / DSH / Kimi Code / MiMoCode / Pi Desktop / Devin 的 cache_write 与 input 独立，故计入。Copilot CLI 原生缓存已含于输入，拆分后计入；DSH 缓存字段省略时按协议默认 0，详见第 10 节；Devin 的显式 JSON null 按 0 计属已记录推断，详见第 18 节。
 
@@ -75,7 +75,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 | 未知项标识                                                    | 含义                                                                                   | 影响                                                                     |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `cache_write.relation_to_input`                               | Codex / OpenCode 的 `cache_write` 与 `input` 的关系无法判定（本机取值全为 0 或缺样本） | 不计入总量；记录在 `unknown_relations` 列，UI 需可标注                   |
-| `cache_read.missing`                                          | 客户端未提供 `cache_read`，无法把 input 拆成"未命中缓存"部分                           | `input` 桶保留原始值，总量按客户端值                                     |
+| `cache_read.missing`                                          | 客户端未提供 `cache_read`，无法把 input 拆成"未命中缓存"部分                           | `input` 桶保留原始值，总量优先客户端值；父桶完整时可换算                                     |
 | `reasoning.missing`                                           | 客户端未提供 `reasoning`，无法把 output 拆成"非推理"部分                               | `reasoning` 桶为 NULL 并记录该未知项；Devin、Claude Code、Kimi Code 同理 |
 | `total.unavailable_due_to_missing_fields`                     | 字段缺失导致总量未知                                                                   | `total_tokens` 为 NULL                                                   |
 | `anomaly.cache_read_gt_input` / `anomaly.reasoning_gt_output` | 与声明的包含关系矛盾的数据                                                             | 分桶取 0 并标注，不 panic、不回绕                                        |
@@ -194,7 +194,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 
 | 情况                                                | 处理                                                                                                                         |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| 新格式窗口内的请求                                  | 旧格式会写一条数值相同的**镜像事件**：按顺序配对后丢弃，避免同一请求统计两次                                                 |
+| 新格式窗口内的请求                                  | 从首条新格式开始以新格式为准，旧格式镜像不再按数值相等配对（压缩后可能不等），避免重复                                                 |
 | 新格式开始之前的旧格式历史（81/252 个混合文件存在） | 保留为请求明细（去重键 `token_count:<ordinal>`）                                                                             |
 | 线程累计值                                          | 取 `thread_token_usage.total_tokens` 与 `total_token_usage` 的**最大值**；两个计数器起点不同，既不能相加也不能固定偏向新格式 |
 | 明细完整度                                          | 该线程只要有任一文件从 `ordinal 0` 开始即为 `complete`，否则 `partial`                                                       |
@@ -204,9 +204,9 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 两种用量记录均支持缺失 `ordinal`（2026-10-12，口径 2.5）。请求键优先非空 `response_id`、其次真实 `ordinal`，已有键不变。
 无两者时，累计 `total_tokens` 已知则使用 `token_count:cumulative:<input>:<output>:<cache_read>:<cache_write>:<reasoning>:<total>`，未知字段编码为 `?`；
 否则使用 `token_count:file:<绝对路径>:line:<从 1 开始的物理行号>`。相同累计通知只保留一次，同文件保留首次时间；跨文件由现有 store 去重。
-新旧镜像配对前先排除无序号旧格式中的重复通知，配对规则本身不变。文件行号回退仅保证同文件幂等，不能识别跨文件复制。
+无序号旧格式前缀先按累计键排除重复通知；新格式开始后的旧事件不再单独计入（口径 2.23）。文件行号回退仅保证同文件幂等，不能识别跨文件复制。
 累计快照回退无法识别计数器重置或相同快照的零用量请求，完整度仍按真实 ordinal 判断；无序号时 `seq` 为 NULL，来源引用记录累计字段或文件行号。
-`info` / `last_token_usage` 为 null 的旧格式状态通知不生成请求。parser_version 为 2；升级同步自动重读旧文件，规则与影响见 `data-metrics.md` 2.5。
+`info` / `last_token_usage` 为 null 的旧格式状态通知不生成请求。parser_version 为 3；升级同步自动重读旧文件，规则与影响见 `data-metrics.md` 2.5 / 2.23。
 
 - 决策依据：`(size_bytes, mtime_ms, parser_version)`。未变化 → 跳过；变化 → 整文件重新解析。
 - 写入是"覆盖式"的：先删除该源文件此前的明细，再写入本次结果，单事务提交（`UsageStore.ReplaceFileImport`）。
@@ -275,7 +275,7 @@ C# 记录属性按 .NET 命名一一对应；WPF 界面直接读取领域记录�
 
 任一文件追加、截断、替换、消失或解析版本变化时，重新聚合整个文件集合。
 必需字段在任一请求中缺失，该会话对应字段与总量保持未知，已知请求数仍可展示。
-完整扫描后以 `UsageStore.ReplaceClientSnapshot` 原子替换该客户端快照与水位；因此删除或修正源记录会反映到统计中。
+完整扫描后以 `UsageStore.ReplaceClientSnapshot` 原子替换该客户端快照与水位；因此删除或修正源记录会反映到统计中；已有历史时零会话结果拒绝替换并保留水位（口径 2.23）。
 读取失败、目录枚举失败、末尾半行或扫描期间文件变化时不提交；完整但损坏的行计数并标记快照明细不完整。
 根目录缺失不会清除历史。未变化的文件集合跳过；同大小同 mtime 替换需要强制重扫。
 
@@ -565,7 +565,7 @@ session.totalTokens 是会话client_reported；turnNumber 是轮级去重键。�
 
 去重：CLI 优先 `usage.request_id`，其次条目 `request_id`，再按 message id / uuid / 行号回退；同一请求拆成多个消息块只计一次，实测优先于估算、估算优先于未知，同等级保留最后一条。IDE 请求键仍为 message id（缺失回退 rowid）。跨 IDE / CLI 同会话只保留请求更多的一侧，相同偏好 IDE。无 usage 的 assistant 行忽略，坏 JSON / token_info 计 unparsed，缺失字段保持未知。
 
-同步：IDE 通过 `SqliteSnapshot` 读取已提交主库 + WAL；CLI 按 size / mtime / parser_version 判断重扫。提交前复核来源列表、文件指纹与数据库 signature。parser_version 4 首次同步重算 CLI 分桶和去重，不新增数据库 schema、迁移、依赖、管理员权限或联网能力。
+同步：IDE 通过 `SqliteSnapshot` 读取已提交主库 + WAL；CLI 按 size / mtime / parser_version 判断重扫。提交前复核来源列表、文件指纹与数据库 signature。parser_version 4 首次同步重算 CLI 分桶和去重，版本 5 再补回 IDE 已知总量（口径 2.23），不新增数据库 schema、迁移、依赖、管理员权限或联网能力。
 
 ## 23. CodeArts（口径 2.18，2026-10-20）
 
@@ -631,7 +631,7 @@ UDP 17831 广播发现、TCP 17832（占用时回退）拉取；不读取对端�
 - 多设备模式 `Sessions` 改为区间/桶内**开始的会话数**（`SessionsStartBased`），本机模式仍为
   区间内有请求的去重会话；UI 标注「按开始」。
 - 模型排行、项目排行、最近会话、会话总账仍只统计本机（`DetailsLocalOnly`）；peer-only 时为空。
-- 预设范围从本地零点开始，peer 日聚合精确；自定义范围带时分边界时，其他设备按整日计入
+- 日视图按对方本地日历日期聚合（不宣称与本机精确时间窗口相同）；自定义范围带时分边界时，其他设备按整日计入
   （`PeerGranularityDaily`），UI 标注“其他设备按日聚合”，不冒充精确值。
 - `all` 范围起点取本机与各 peer 最早数据的最小值；peer 快照离线时保留上次导入数据并显示快照时间。
 
@@ -640,3 +640,13 @@ UDP 17831 广播发现、TCP 17832（占用时回退）拉取；不读取对端�
 `probe peer-export <db> <out>` 生成快照，`probe peer-import <db> <snapshot>` 导入，
 `probe peer-totals <db> [local] [range]` 查看合并结果，`probe peer-roundtrip <dbA> <dbB> <folder>`
 双向导入并核对合计。测试覆盖快照序列化/校验、伪客户端合并、陈旧快照跳过、回环 UDP/TCP 发现。
+
+
+## 25. 审查修复契约（口径 2.23，2026-11-06）
+
+- `TokenBuckets.SumWith`：IncludedIn 子桶缺失时父桶仍完整，总量可确定；缺失细分保持 NULL 与 unknown_relations。Separate 子桶缺失仍使无客户端自报总量的结果为未知。
+- `WriteClientSnapshot`：零会话不能覆盖已有会话/水位；`MergeClientSnapshot` 先调用 `UpsertSession` 判断陈旧，再替换接受会话的消息，`ImportSummary.SessionsSkippedStale` 汇总拒绝计数。被拒绝来源不推进旧水位。
+- `TokenViewDatabase.RequestRowsSql`：完整小时预聚合 + 精确边界明细；非整小时偏移时区走明细分桶。请求会话去重共用完整小时与边界明细裁剪；总账中的今日摘要与托盘共用请求范围投影。
+- `PeerUsageReader`：日粒度查询使用双方的日历日期标签，起点向下与终点向上扩展；午夜终点排除下一日，全部历史的起始日也用相同映射。原 `utcOffsetMinutes` 只足以恢复日历标签，不提供完整历史时区规则。
+- `SyncService.ClearStatisticsAsync` 统一暂停、保存与等待写入后调用 `UsageStore.ClearStatistics`；LAN 同时关闭，防止清除后自动回填。
+- Codex / Qoder / CodeArts parser_version 分别为 3 / 5 / 2；无数据库迁移。前文旧版本历史条目保留日期，以本节为当前修正规则。
