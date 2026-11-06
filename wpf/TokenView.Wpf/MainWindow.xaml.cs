@@ -955,7 +955,7 @@ public partial class MainWindow : Window
                 : "按会话开始日筛选，展示整段会话累计；与上方按请求时间的总量不可直接对账。";
         if (snapshot.PeerGranularityDaily)
         {
-            SessionViewNote.Text += " 其他设备按日聚合，自定义范围的边界日按整日计入。";
+            SessionViewNote.Text += " 其他设备按日聚合，自定义范围的边界日按对方本地整日计入。";
         }
         LedgerButton.Content = snapshot.DetailsLocalOnly ? "查看本机会话总账" : "查看会话总账";
         LedgerButton.Visibility = peerOnly ? Visibility.Collapsed : Visibility.Visible;

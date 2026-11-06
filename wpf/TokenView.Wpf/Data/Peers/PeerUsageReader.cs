@@ -25,6 +25,21 @@ internal sealed record PeerSessionUsageRow(
 /// <summary>只读 peer_* 表；写入仍由 PeerSnapshotStore 统一负责。</summary>
 internal static class PeerUsageReader
 {
+    private const string CalendarDayExpression =
+        "((day_ms + utc_offset_minutes * 60000 + 43200000) / 86400000) * 86400000";
+
+    public static long FirstDay(SqliteConnection connection, string deviceId, long fallback)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT MIN({CalendarDayExpression}) FROM peer_request_daily JOIN peer_devices USING (device_id)
+            WHERE device_id = $device;
+            """;
+        command.Parameters.AddWithValue("$device", deviceId);
+        var result = command.ExecuteScalar();
+        return result is null or DBNull ? fallback : CalendarDayToLocal(Convert.ToInt64(result));
+    }
+
     public static List<PeerDeviceRow> ReadDevices(SqliteConnection connection, DeviceSelection selection)
     {
         if (!PeerSnapshotStore.TableExists(connection))
@@ -71,13 +86,15 @@ internal static class PeerUsageReader
         }
         var table = hourly ? "peer_request_hourly" : "peer_request_daily";
         var timeColumn = hourly ? "hour_ms" : "day_ms";
+        var timeExpression = hourly ? timeColumn : CalendarDayExpression;
+        if (!hourly) (fromMs, toMs) = CalendarBounds(fromMs, toMs);
         using var command = connection.CreateCommand();
         command.CommandText = $"""
-            SELECT device_id, {timeColumn}, client, model, requests, requests_with_usage,
+            SELECT device_id, {timeExpression}, client, model, requests, requests_with_usage,
                    requests_without_usage, tokens, estimated_tokens, estimated_requests
-            FROM {table}
+            FROM {table} JOIN peer_devices USING (device_id)
             WHERE {DeviceFilter(devices, command)}
-              AND {timeColumn} >= $from AND {timeColumn} < $to
+              AND {timeExpression} >= $from AND {timeExpression} < $to
             ORDER BY {timeColumn}, device_id, client, model;
             """;
         command.Parameters.AddWithValue("$from", fromMs);
@@ -92,7 +109,7 @@ internal static class PeerUsageReader
             rows.Add(new PeerUsageRow(
                 deviceId,
                 names.GetValueOrDefault(deviceId, deviceId),
-                reader.GetInt64(1),
+                hourly ? reader.GetInt64(1) : CalendarDayToLocal(reader.GetInt64(1)),
                 reader.GetString(2),
                 reader.GetString(3),
                 reader.GetInt32(4),
@@ -118,12 +135,14 @@ internal static class PeerUsageReader
         }
         var table = hourly ? "peer_session_hourly" : "peer_session_daily";
         var timeColumn = hourly ? "hour_ms" : "day_ms";
+        var timeExpression = hourly ? timeColumn : CalendarDayExpression;
+        if (!hourly) (fromMs, toMs) = CalendarBounds(fromMs, toMs);
         using var command = connection.CreateCommand();
         command.CommandText = $"""
-            SELECT device_id, {timeColumn}, client, sessions
-            FROM {table}
+            SELECT device_id, {timeExpression}, client, sessions
+            FROM {table} JOIN peer_devices USING (device_id)
             WHERE {DeviceFilter(devices, command)}
-              AND {timeColumn} >= $from AND {timeColumn} < $to
+              AND {timeExpression} >= $from AND {timeExpression} < $to
             ORDER BY {timeColumn}, device_id, client;
             """;
         command.Parameters.AddWithValue("$from", fromMs);
@@ -138,12 +157,27 @@ internal static class PeerUsageReader
             rows.Add(new PeerSessionUsageRow(
                 deviceId,
                 names.GetValueOrDefault(deviceId, deviceId),
-                reader.GetInt64(1),
+                hourly ? reader.GetInt64(1) : CalendarDayToLocal(reader.GetInt64(1)),
                 reader.GetString(2),
                 reader.GetInt32(3)));
         }
         return rows;
     }
+
+    private static (long From, long To) CalendarBounds(long fromMs, long toMs)
+    {
+        var from = DateTimeOffset.FromUnixTimeMilliseconds(fromMs).LocalDateTime.Date;
+        var to = DateTimeOffset.FromUnixTimeMilliseconds(toMs).LocalDateTime;
+        var end = to.TimeOfDay == TimeSpan.Zero ? to.Date : to.Date.AddDays(1);
+        return (new DateTimeOffset(DateTime.SpecifyKind(from, DateTimeKind.Unspecified), TimeSpan.Zero).ToUnixTimeMilliseconds(),
+            new DateTimeOffset(DateTime.SpecifyKind(end, DateTimeKind.Unspecified), TimeSpan.Zero).ToUnixTimeMilliseconds());
+    }
+
+    // 快照按对方本地日聚合；用声明偏移还原日历标签并映射到查看方日界。
+    // 取最近午夜容忍快照当前偏移与历史夏令时偏移的一小时差。
+    private static long CalendarDayToLocal(long dayMs) => new DateTimeOffset(
+        DateTime.SpecifyKind(DateTimeOffset.FromUnixTimeMilliseconds(dayMs).UtcDateTime.Date,
+            DateTimeKind.Unspecified)).ToUnixTimeMilliseconds();
 
     private static string DeviceFilter(
         IReadOnlyList<PeerDeviceRow> devices,

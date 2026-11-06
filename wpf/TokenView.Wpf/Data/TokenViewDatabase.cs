@@ -97,7 +97,7 @@ public static class TokenViewDatabase
         var withUsage = hours.Sum(row => row.RequestsWithUsage);
         var withoutUsage = hours.Sum(row => row.RequestsWithoutUsage);
         var sessions = ScalarLong(connection,
-            "SELECT COUNT(DISTINCT session_id) FROM request_hourly_sessions WHERE hour_ms >= $from AND hour_ms < $to",
+            $"SELECT COUNT(DISTINCT session_id) FROM ({RequestSessionRowsSql(from, to)})",
             from, to);
         var sessionsPartial = ScalarLong(connection,
             "SELECT COUNT(*) FROM sessions WHERE message_coverage = 'partial'");
@@ -157,7 +157,7 @@ public static class TokenViewDatabase
             var peerMin = to;
             foreach (var peer in peers)
             {
-                var min = PeerMinDay(connection, peer.DeviceId, to);
+                var min = PeerUsageReader.FirstDay(connection, peer.DeviceId, to);
                 if (min < peerMin) peerMin = min;
             }
             from = Math.Min(localMin, peerMin);
@@ -394,19 +394,6 @@ public static class TokenViewDatabase
             counts[reader.GetString(0)] = reader.GetInt32(1);
         }
         return counts;
-    }
-
-    private static long PeerMinDay(SqliteConnection connection, string deviceId, long fallback)
-    {
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT COALESCE(MIN(day_ms), $fallback) FROM peer_request_daily
-            WHERE device_id = $device;
-            """;
-        command.Parameters.AddWithValue("$fallback", fallback);
-        command.Parameters.AddWithValue("$device", deviceId);
-        var result = command.ExecuteScalar();
-        return result is null or DBNull ? fallback : Convert.ToInt64(result);
     }
 
     private static bool IsLocalMidnight(long value) =>
@@ -667,23 +654,11 @@ public static class TokenViewDatabase
         var todayStart = StartOfDay(DateTime.Today);
         long todayTokens = 0;
         int todayRequests = 0, todayRequestsWithoutUsage = 0;
-        using (var todayCommand = connection.CreateCommand())
-        {
-            todayCommand.CommandText = """
-                SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(requests), 0),
-                       COALESCE(SUM(requests_without_usage), 0)
-                FROM request_hourly WHERE hour_ms >= $from AND hour_ms < $to;
-                """;
-            todayCommand.Parameters.AddWithValue("$from", todayStart);
-            todayCommand.Parameters.AddWithValue("$to", to);
-            using var todayReader = todayCommand.ExecuteReader();
-            if (todayReader.Read())
-            {
-                todayTokens = todayReader.GetInt64(0);
-                todayRequests = todayReader.GetInt32(1);
-                todayRequestsWithoutUsage = todayReader.GetInt32(2);
-            }
-        }
+        var todayRows = ReadHourRows(connection, todayStart, to);
+        todayTokens = todayRows.Sum(row => row.Tokens);
+        todayRequests = todayRows.Sum(row => row.Requests);
+        todayRequestsWithoutUsage = todayRows.Sum(row => row.RequestsWithoutUsage);
+
         var sessionsWithoutUsage = ScalarLong(connection,
             "SELECT COUNT(*) FROM sessions WHERE started_at_ms >= $from AND started_at_ms < $to " +
             "AND source_kind <> 'estimated' AND total_tokens IS NULL", from, to);
@@ -728,15 +703,70 @@ public static class TokenViewDatabase
     private sealed record HourRow(long HourMs, string Client, string ClientLabel, string ColorHex,
         string Model, int Requests, int RequestsWithUsage, int RequestsWithoutUsage, long Tokens);
 
+    private static (long First, long Last, bool Available) FullRequestHours(long from, long to)
+    {
+        var firstFullHour = from / HourMs * HourMs + (from % HourMs == 0 ? 0 : HourMs);
+        var lastFullHour = to / HourMs * HourMs;
+        // 非整小时时区下 UTC 小时跨越本地日界，必须从明细重新分桶。
+        var fractionalOffset = TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.FromUnixTimeMilliseconds(from)).Ticks %
+                               TimeSpan.TicksPerHour != 0 ||
+                               TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.FromUnixTimeMilliseconds(to)).Ticks %
+                               TimeSpan.TicksPerHour != 0;
+        return (firstFullHour, lastFullHour, !fractionalOffset && firstFullHour < lastFullHour);
+    }
+
+    private static string RequestEdgeFilter(long from, long to)
+    {
+        var (first, last, available) = FullRequestHours(from, to);
+        return available
+            ? $"(m.created_at_ms >= $from AND m.created_at_ms < {first}) OR " +
+              $"(m.created_at_ms >= {last} AND m.created_at_ms < $to)"
+            : "m.created_at_ms >= $from AND m.created_at_ms < $to";
+    }
+
+    private static string RequestSessionRowsSql(long from, long to)
+    {
+        var (first, last, available) = FullRequestHours(from, to);
+        var full = available ? $"""
+            SELECT hour_ms, session_id, client FROM request_hourly_sessions
+            WHERE hour_ms >= {first} AND hour_ms < {last}
+            UNION ALL
+            """ : "";
+        return full + "\n" + $"""
+            SELECT (m.created_at_ms / 60000) * 60000 AS hour_ms, m.session_id, m.client
+            FROM messages m WHERE {RequestEdgeFilter(from, to)}
+            GROUP BY hour_ms, m.session_id, m.client
+            """;
+    }
+
+    private static string RequestRowsSql(long from, long to)
+    {
+        var (firstFullHour, lastFullHour, hasFullHours) = FullRequestHours(from, to);
+        var fullHours = hasFullHours ? $"""
+            SELECT hour_ms, client, model, requests, requests_with_usage, requests_without_usage, total_tokens
+            FROM request_hourly WHERE hour_ms >= {firstFullHour} AND hour_ms < {lastFullHour}
+            UNION ALL
+            """ : "";
+        return fullHours + "\n" + $"""
+            SELECT (m.created_at_ms / 60000) * 60000 AS hour_ms, s.client, COALESCE(m.model, s.model) AS model,
+                   COUNT(*) AS requests,
+                   SUM(m.source_kind <> 'estimated' AND m.total_tokens IS NOT NULL) AS requests_with_usage,
+                   SUM(m.source_kind = 'estimated' OR m.total_tokens IS NULL) AS requests_without_usage,
+                   COALESCE(SUM(CASE WHEN m.source_kind <> 'estimated' THEN m.total_tokens ELSE 0 END), 0) AS total_tokens
+            FROM messages m JOIN sessions s ON s.id = m.session_id
+            WHERE {RequestEdgeFilter(from, to)}
+            GROUP BY hour_ms, s.client, COALESCE(m.model, s.model)
+            """;
+    }
+
     private static List<HourRow> ReadHourRows(SqliteConnection connection, long from, long to)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT hour_ms, client, COALESCE(model, ''),
                    SUM(requests), SUM(requests_with_usage), SUM(requests_without_usage),
                    SUM(total_tokens)
-            FROM request_hourly
-            WHERE hour_ms >= $from AND hour_ms < $to
+            FROM ({RequestRowsSql(from, to)})
             GROUP BY hour_ms, client, COALESCE(model, '')
             ORDER BY hour_ms;
             """;
@@ -813,9 +843,8 @@ public static class TokenViewDatabase
     {
         var sets = new Dictionary<long, HashSet<string>>();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT hour_ms, session_id FROM request_hourly_sessions
-            WHERE hour_ms >= $from AND hour_ms < $to;
+        command.CommandText = $"""
+            SELECT hour_ms, session_id FROM ({RequestSessionRowsSql(from, to)});
             """;
         command.Parameters.AddWithValue("$from", from);
         command.Parameters.AddWithValue("$to", to);
@@ -885,10 +914,9 @@ public static class TokenViewDatabase
         IReadOnlyList<EstimatedUsageRow> estimates)
     {
         using var sessionsCommand = connection.CreateCommand();
-        sessionsCommand.CommandText = """
+        sessionsCommand.CommandText = $"""
             SELECT client, COUNT(DISTINCT session_id)
-            FROM request_hourly_sessions
-            WHERE hour_ms >= $from AND hour_ms < $to
+            FROM ({RequestSessionRowsSql(from, to)})
             GROUP BY client;
             """;
         sessionsCommand.Parameters.AddWithValue("$from", from);
@@ -956,11 +984,10 @@ public static class TokenViewDatabase
         long from, long to)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = """
+        command.CommandText = $"""
             SELECT client, COALESCE(model, '—') AS model, SUM(requests) AS requests,
                    SUM(total_tokens) AS tokens, SUM(requests_without_usage) AS requests_without_usage
-            FROM request_hourly
-            WHERE hour_ms >= $from AND hour_ms < $to
+            FROM ({RequestRowsSql(from, to)})
             GROUP BY client, COALESCE(model, '—')
             ORDER BY client, tokens DESC, requests DESC;
             """;
@@ -1108,17 +1135,9 @@ public static class TokenViewDatabase
         var start = new DateTimeOffset(DateTime.Today).ToUnixTimeMilliseconds();
         var end = DateTimeOffset.Now.ToUnixTimeMilliseconds() + 60_000;
         using var connection = OpenReadOnly();
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT COALESCE(SUM(total_tokens), 0), COALESCE(SUM(requests), 0),
-                   COALESCE(SUM(requests_without_usage), 0)
-            FROM request_hourly WHERE hour_ms >= $from AND hour_ms < $to;
-            """;
-        command.Parameters.AddWithValue("$from", start);
-        command.Parameters.AddWithValue("$to", end);
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) return (0, 0, 0);
-        return (reader.GetInt64(0), reader.GetInt32(1), reader.GetInt32(2));
+        var rows = ReadHourRows(connection, start, end);
+        return (rows.Sum(row => row.Tokens), rows.Sum(row => row.Requests),
+            rows.Sum(row => row.RequestsWithoutUsage));
     }
 
     public static Dictionary<string, ClientStatsRow> LoadClientStats()
