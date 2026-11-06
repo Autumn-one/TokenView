@@ -11,6 +11,23 @@ public sealed class MirrorContentServiceTests
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.FromUnixTimeMilliseconds(1_790_000_000_000);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FetchErrorsDoNotExposeExceptionMessages(bool io)
+    {
+        var secret = @"C:\Users\synthetic-user\private-source";
+        var handler = new StubHttpHandler(_ => throw (io
+            ? (Exception)new System.IO.IOException(secret)
+            : new HttpRequestException(secret)));
+        var result = await Service(handler).FetchAsync(
+            Config(new SourceConfig("source", true, 10, "https://source.test/a.md")),
+            ContentKind.Announcement, CancellationToken.None);
+        Assert.False(result.Success);
+        Assert.DoesNotContain(secret, result.ErrorMessage);
+        Assert.Contains(io ? "IOException" : "HttpRequestException", result.ErrorMessage);
+    }
+
     [Fact]
     public async Task FetchesSourcesInPriorityOrderAndStopsAtFirstSuccess()
     {

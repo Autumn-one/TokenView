@@ -87,7 +87,7 @@ public sealed class AboutInfoService
         }
         catch (Exception error)
         {
-            Error = error.Message;
+            Error = $"获取关于信息失败，请稍后重试（{error.GetType().Name}）";
         }
         finally
         {

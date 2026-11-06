@@ -71,13 +71,17 @@ public sealed class AnnouncementServiceTests
         {
             OnFetch = _ => Task.FromResult(Success("hash-1")),
         };
-        var service = new AnnouncementService(fetcher, () => null, _ => throw new IOException("disk full"));
+        var service = new AnnouncementService(fetcher, () => null,
+            _ => throw new IOException(@"C:\Users\synthetic-user\settings.json is locked"));
         await service.RefreshAsync();
 
         service.MarkRead("hash-1");
 
         Assert.True(service.HasUnread);
         Assert.NotNull(service.Error);
+        Assert.DoesNotContain("synthetic-user", service.Error);
+        Assert.DoesNotContain("C:\\", service.Error);
+        Assert.Contains("IOException", service.Error);
     }
 
     [Fact]

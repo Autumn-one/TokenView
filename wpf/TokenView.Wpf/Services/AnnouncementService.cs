@@ -61,7 +61,7 @@ public sealed class AnnouncementService
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            Error = $"无法保存已读状态：{error.Message}";
+            Error = $"无法保存已读状态，请检查存储权限或稍后重试（{error.GetType().Name}）";
             Changed?.Invoke();
             return;
         }
@@ -98,7 +98,7 @@ public sealed class AnnouncementService
         }
         catch (Exception error)
         {
-            Error = error.Message;
+            Error = $"获取公告失败，请稍后重试（{error.GetType().Name}）";
         }
         finally
         {

@@ -519,7 +519,7 @@ public partial class SettingsWindow : Window
                 Style = (Style)FindResource("LinkButton"),
                 Margin = new Thickness(8, 0, 0, 0),
             };
-            copy.Click += (_, _) => CopyDiagnostics(key, info, clientStats: stats.GetValueOrDefault(key),
+            copy.Click += (_, _) => CopyDiagnostics(key, clientStats: stats.GetValueOrDefault(key),
                 result);
             actions.Children.Add(copy);
             stack.Children.Add(actions);
@@ -529,52 +529,22 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void CopyDiagnostics(string key, ClientInfo info, ClientStatsRow? clientStats,
+    private void CopyDiagnostics(string key, ClientStatsRow? clientStats,
         ClientSyncResult? result)
     {
-        var lines = new List<string>
-        {
-            $"TokenView {UpdateService.CurrentVersion} · WPF",
-            $"客户端：{info.Label} ({key})",
-            $"启用：{_settings.EnabledClients.Contains(key)} · 暂停：{_settings.CollectionPaused}",
-        };
-        var collector = SyncEngine.Find(key);
-        if (collector is not null)
-        {
-            foreach (var path in collector.SourcePaths)
-            {
-                var state = File.Exists(path) || Directory.Exists(path) ? "可访问" : "不存在";
-                lines.Add($"来源：{path} · {state}");
-            }
-        }
-        if (clientStats is not null)
-        {
-            lines.Add($"会话 {clientStats.Sessions} · 明细 {clientStats.Messages} · " +
-                      $"已跟踪文件 {clientStats.Files} · 无法解析 {clientStats.Unparsed}" +
-                      (clientStats.EstimatedSessions > 0
-                          ? $" · 估算 {clientStats.EstimatedSessions}"
-                          : ""));
-        }
-        if (result?.Report is { } report)
-        {
-            lines.Add($"扫描 {report.FilesSeen} · 解析 {report.FilesParsed} · " +
-                      $"未变化 {report.FilesSkippedUnchanged} · 失败 {report.FilesFailed} · " +
-                      $"目录失败 {report.DirectoriesFailed}");
-            if (report.UnparsedLines > 0) lines.Add($"无法解析行 {report.UnparsedLines}");
-        }
-        if (result?.Error is { } error)
-        {
-            lines.Add($"错误：{error}{(result.Retryable ? "（可重试）" : "")}");
-        }
+        var paths = SyncEngine.Find(key)?.SourcePaths ?? [];
+        var text = CollectionDiagnostics.Build(key, _settings.EnabledClients.Contains(key),
+            _settings.CollectionPaused, paths.Count,
+            paths.Count(path => File.Exists(path) || Directory.Exists(path)), clientStats, result);
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine, lines));
+            Clipboard.SetText(text);
             MessageBox.Show(this, "已复制脱敏诊断摘要。", "TokenView", MessageBoxButton.OK,
                 MessageBoxImage.Information);
         }
         catch (Exception failure)
         {
-            MessageBox.Show(this, $"复制失败：{failure.Message}", "TokenView", MessageBoxButton.OK,
+            MessageBox.Show(this, $"复制失败，请稍后重试（{failure.GetType().Name}）", "TokenView", MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
     }

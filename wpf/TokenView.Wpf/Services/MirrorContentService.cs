@@ -187,13 +187,13 @@ public sealed class MirrorContentService : IContentFetcher
         {
             return new RawFetch(null, "请求超时（12 秒）");
         }
-        catch (HttpRequestException error)
+        catch (HttpRequestException)
         {
-            return new RawFetch(null, error.Message);
+            return new RawFetch(null, "网络请求失败（HttpRequestException）");
         }
-        catch (IOException error)
+        catch (IOException)
         {
-            return new RawFetch(null, error.Message);
+            return new RawFetch(null, "读取响应失败（IOException）");
         }
     }
 

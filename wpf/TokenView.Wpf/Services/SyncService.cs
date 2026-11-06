@@ -57,7 +57,7 @@ public sealed class SyncService
             }
             catch (Exception error)
             {
-                HardError = error.Message;
+                HardError = $"同步失败，请检查数据源与存储权限（{error.GetType().Name}）";
             }
             finally
             {

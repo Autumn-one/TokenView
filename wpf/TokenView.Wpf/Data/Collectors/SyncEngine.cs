@@ -57,7 +57,8 @@ public static class SyncEngine
                 }
                 catch (Exception error)
                 {
-                    result = new ClientSyncResult(client, null, error.Message, false);
+                    result = new ClientSyncResult(client, null,
+                        $"同步失败，已保留未提交的统计；请检查数据源与存储权限（{error.GetType().Name}）", false);
                 }
             }
             batch.Clients.Add(result);
